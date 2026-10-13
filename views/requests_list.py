@@ -75,7 +75,9 @@ with left:
         },
     )
     rows = event.selection.rows
-    sel_id = view.iloc[rows[0]]["id"] if rows else None
+    # GÜVENLİ HÂLİ: rows[0] değeri view'ın satır sayısından küçükse çalışır
+    sel_id = view.iloc[rows[0]]["id"] if rows and rows[0] < len(view) else None
+    
     if sel_id != st.session_state.get("_son_secim"):
         st.session_state["_son_secim"] = sel_id
         st.session_state["secili_talep"] = sel_id
