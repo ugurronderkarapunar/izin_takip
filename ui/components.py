@@ -12,6 +12,7 @@ from core import config, documents, services
 from core.config import S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED, STATUS_ICON
 from core.utils import fmt_date, fmt_dt
 
+UI_VERSION = "2.2"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
@@ -60,7 +61,8 @@ def run(fn: Callable, *args, ok_msg: str, **kwargs) -> bool:
         st.error(str(exc))
         return False
     st.session_state.pop("_saglik", None)  # bütünlük özeti yeniden hesaplansın
-    flash(ok_msg)
+    if ok_msg:
+        flash(ok_msg)
     return True
 
 
@@ -154,6 +156,37 @@ def dialog_sap(talep_id: str, revoke: bool = False) -> None:
     note = st.text_input("Not (isteğe bağlı)", key=f"dlg_sn_{talep_id}")
     if st.button("SAP'ye girildi olarak kaydet", type="primary", key=f"dlg_sok_{talep_id}", width="stretch"):
         if run(services.mark_sap, talep_id, tarih, note, ok_msg=f"{talep_id} SAP girişi kaydedildi"):
+            st.rerun()
+
+
+@st.dialog("Talebi düzenle")
+def dialog_edit(talep_id: str) -> None:
+    r = services.get_request(talep_id)
+    _summary(r)
+    k = lambda n: f"dlg_e{n}_{talep_id}"  # noqa: E731
+    tur = st.selectbox("İzin türü", config.LEAVE_TYPES, index=config.LEAVE_TYPES.index(r["izin_turu"]), key=k("t"))
+    c1, c2 = st.columns(2)
+    start = c1.date_input("Başlangıç", value=date.fromisoformat(r["baslangic"]), format="DD.MM.YYYY", key=k("s"))
+    end = c2.date_input("Bitiş", value=date.fromisoformat(r["bitis"]), format="DD.MM.YYYY", key=k("e"))
+    aciklama = st.text_area("Açıklama", value=r["aciklama"], key=k("a"))
+    approved = r["durum"] == S_APPROVED
+    if approved:
+        st.info("Bu talep onaylı. Tür veya tarih değişirse talep **yeniden onaya** düşer; yalnızca açıklama değişirse onay korunur.")
+    gerekce = st.text_area("Düzenleme gerekçesi" + (" *" if approved else " (isteğe bağlı)"), key=k("g"))
+    pv = services.preview_request(r["personel_adi"], tur, start, end, exclude_id=talep_id)
+    st.caption(f"{pv['is_gunu']} iş günü · {pv['takvim_gun']} takvim günü")
+    for e in pv["errors"]:
+        st.error(e)
+    for w in pv["warnings"]:
+        st.warning(w)
+    override = False
+    if pv["bakiye_yetersiz"]:
+        st.warning("Yıllık izin bakiyesi yetersiz.")
+        override = st.checkbox("Bakiye yetersiz olsa da kaydet (loga işlenir)", key=k("o"))
+    blocked = bool(pv["errors"]) or (pv["bakiye_yetersiz"] and not override)
+    if st.button("Değişiklikleri kaydet", type="primary", disabled=blocked, key=k("ok"), width="stretch"):
+        if run(services.edit_request, talep_id, tur, start, end, aciklama, gerekce, override,
+               ok_msg=f"{talep_id} düzenlendi"):
             st.rerun()
 
 
@@ -253,6 +286,8 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
             actions.append(("🧾 SAP'ye girildi", "sp", lambda: dialog_sap(talep_id)))
         if approved and r["sap_girildi"] and can("duzeltme"):
             actions.append(("↩️ SAP işaretini geri al", "sr", lambda: dialog_sap(talep_id, revoke=True)))
+        if can("duzenle") and services.can_edit_request(r):
+            actions.append(("✏️ Düzenle", "ed", lambda: dialog_edit(talep_id)))
         if can("ek_ekle"):
             actions.append(("📎 Ek ekle", "at", lambda: dialog_attach(talep_id)))
         if can("sil"):
