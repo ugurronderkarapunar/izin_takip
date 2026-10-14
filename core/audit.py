@@ -171,6 +171,10 @@ def verify_consistency(requests: list[dict[str, Any]], logs: list[dict[str, Any]
             s["sap"] = True
         elif op == "SAP Girişi Geri Alındı":
             s["sap"] = False
+        elif op == "Talep Silindi":
+            s["silindi"] = True
+        elif op == "Talep Geri Yüklendi":
+            s["silindi"] = False
     issues: list[str] = []
     ids = {r["id"] for r in requests}
     for r in requests:
@@ -186,6 +190,8 @@ def verify_consistency(requests: list[dict[str, Any]], logs: list[dict[str, Any]
             issues.append(f"{r['id']}: SAP bilgisi log ile uyuşmuyor.")
         if bool(s.get("cikti")) != bool(r.get("cikti_alindi")):
             issues.append(f"{r['id']}: çıktı bilgisi log ile uyuşmuyor.")
+        if bool(s.get("silindi")) != bool(r.get("silindi")):
+            issues.append(f"{r['id']}: silinme durumu log ile uyuşmuyor.")
     for tid in state:
         if tid not in ids:
             issues.append(f"{tid}: logda var ama request_db'de yok (talep silinmiş olabilir).")

@@ -123,3 +123,29 @@ class JsonStore:
 
 
 meta_store = JsonStore(config.META_DB, dict)
+
+
+def clear_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+@contextmanager
+def transaction(*stores: JsonStore) -> Iterator[None]:
+    """Kilit altında çalışır; blokta hata olursa verilen depoları eski haline döndürür.
+
+    Böylece 'talep yazıldı ama log yazılamadı' gibi yarım kalmış işlemler oluşmaz.
+    """
+    with data_lock():
+        snaps = [(s, s.read()) for s in stores]
+        try:
+            yield
+        except BaseException:
+            for store, snap in snaps:
+                try:
+                    if store.read() != snap:
+                        store.write(snap)
+                        log.error("İşlem geri alındı (rollback): %s", store.path.name)
+                except Exception:  # geri alma da başarısız olursa asıl hatayı gizleme
+                    log.exception("Rollback başarısız: %s", store.path.name)
+            raise

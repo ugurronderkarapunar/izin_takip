@@ -13,10 +13,10 @@ from typing import Any
 
 import pandas as pd
 
-from . import audit, calendar_utils, config
+from . import audit, backup, calendar_utils, config
 from .config import (ACTIVE_STATUSES, ALLOWED_TRANSITIONS, ANNUAL, LEAVE_TYPES,
                      S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED)
-from .storage import JsonStore, data_lock, meta_store
+from .storage import JsonStore, meta_store, transaction
 from .utils import days_since, fmt_date, now, now_str, parse_date, safe_filename
 
 Request = dict[str, Any]
@@ -24,6 +24,13 @@ Request = dict[str, Any]
 requests_store = JsonStore(config.REQUEST_DB, list)
 personnel_store = JsonStore(config.PERSONNEL_DB, list)
 settings_store = JsonStore(config.SETTINGS_DB, dict)
+SCHEMA_VERSION = 3
+
+
+def _tx():
+    """Tüm veri depolarını kapsayan işlem: hata olursa hepsi eski haline döner."""
+    return transaction(requests_store, audit.logs_store, audit.anchors_store, meta_store,
+                       personnel_store, settings_store, calendar_utils.holidays_store)
 
 _REQ_DEFAULTS: dict[str, Any] = {
     "is_gunu": None, "onay_zamani": None, "karar_veren": None,
@@ -31,6 +38,7 @@ _REQ_DEFAULTS: dict[str, Any] = {
     "ik_teslim": False, "ik_teslim_tarihi": None, "ik_teslim_alan": None, "teslim_gecmisi": [],
     "sap_girildi": False, "sap_tarihi": None, "sap_giren": None, "sap_notu": None,
     "ekler": [],
+    "silindi": False, "silinme_zamani": None, "silen": None, "silme_gerekcesi": None,
 }
 IMPORT_COLUMNS = ["Personel", "İzin Türü", "Başlangıç", "Bitiş", "Açıklama"]
 
@@ -60,17 +68,21 @@ def _normalize(r: Request) -> Request:
     return r
 
 
-def load_requests() -> list[Request]:
-    return [_normalize(r) for r in requests_store.read()]
+def load_requests(include_deleted: bool = False) -> list[Request]:
+    """Varsayılan olarak silinmiş (arşivdeki) talepler dahil edilmez."""
+    reqs = [_normalize(r) for r in requests_store.read()]
+    return reqs if include_deleted else [r for r in reqs if not r["silindi"]]
 
 
 def get_request(talep_id: str) -> Request | None:
-    return next((r for r in load_requests() if r["id"] == talep_id), None)
+    return next((r for r in load_requests(include_deleted=True) if r["id"] == talep_id), None)
 
 
-def _find(requests: list[Request], talep_id: str) -> Request:
+def _find(requests: list[Request], talep_id: str, allow_deleted: bool = False) -> Request:
     for r in requests:
         if r["id"] == talep_id:
+            if r.get("silindi") and not allow_deleted:
+                raise ValueError("Bu talep silinmiş; işlem yapılamaz. Önce geri yükleyin.")
             return r
     raise ValueError(f"Talep bulunamadı: {talep_id}")
 
@@ -106,7 +118,7 @@ def get_settings() -> dict[str, Any]:
 def save_settings(user: str, role: str, new: dict[str, Any]) -> None:
     _need(role, "admin")
     _need_user(user)
-    with data_lock():
+    with _tx():
         cur = get_settings()
         changed = {k: v for k, v in new.items() if k in config.DEFAULT_SETTINGS and k != "kayitli_filtreler" and cur.get(k) != v}
         if not changed:
@@ -120,14 +132,14 @@ def save_filter(name: str, filt: dict[str, Any]) -> None:
     name = name.strip()
     if not name:
         raise ValueError("Filtre adı boş olamaz.")
-    with data_lock():
+    with _tx():
         s = get_settings()
         s["kayitli_filtreler"][name] = filt
         settings_store.write(s)
 
 
 def delete_filter(name: str) -> None:
-    with data_lock():
+    with _tx():
         s = get_settings()
         s["kayitli_filtreler"].pop(name, None)
         settings_store.write(s)
@@ -166,7 +178,7 @@ def add_personnel(user: str, role: str, ad: str, hak: float | None = None, devre
     _need_user(user)
     if not ad.strip():
         raise ValueError("Personel adı boş olamaz.")
-    with data_lock():
+    with _tx():
         _add_person_unlocked(user, role, ad, hak, devreden, telefon, ekip)
 
 
@@ -174,7 +186,7 @@ def update_personnel(user: str, role: str, ad: str, **fields: Any) -> None:
     _need(role, "admin")
     _need_user(user)
     allowed = {"ekip", "telefon", "yillik_hak", "devreden", "aktif"}
-    with data_lock():
+    with _tx():
         people = personnel_store.read()
         p = next((x for x in people if x["ad"] == ad), None)
         if p is None:
@@ -192,7 +204,7 @@ def update_personnel(user: str, role: str, ad: str, **fields: Any) -> None:
 def add_holiday(user: str, role: str, tarih: date, ad: str) -> None:
     _need(role, "admin")
     _need_user(user)
-    with data_lock():
+    with _tx():
         hol = calendar_utils.holidays_store.read()
         if any(h["tarih"] == tarih.isoformat() for h in hol):
             raise ValueError("Bu tarih zaten tatil olarak kayıtlı.")
@@ -204,7 +216,7 @@ def add_holiday(user: str, role: str, tarih: date, ad: str) -> None:
 def remove_holiday(user: str, role: str, tarih: str) -> None:
     _need(role, "admin")
     _need_user(user)
-    with data_lock():
+    with _tx():
         hol = calendar_utils.holidays_store.read()
         new = [h for h in hol if h["tarih"] != tarih]
         if len(new) == len(hol):
@@ -334,7 +346,7 @@ def add_attachment(user: str, role: str, talep_id: str, name: str, data: bytes) 
     _need(role, "ek_ekle")
     _need_user(user)
     _validate_attachment(name, data)
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         meta = _store_attachment(user, req, name, data)
@@ -363,7 +375,7 @@ def create_request(user: str, role: str, personel: str, tur: str, start: date, e
     ekler = ekler or []
     for name, data in ekler:
         _validate_attachment(name, data)
-    with data_lock():
+    with _tx():
         pv = preview_request(personel, tur, start, end)
         if pv["errors"]:
             raise ValueError(pv["errors"][0])
@@ -397,7 +409,7 @@ def create_request(user: str, role: str, personel: str, tur: str, start: date, e
 def update_status(user: str, role: str, talep_id: str, yeni: str, not_: str = "") -> None:
     _need(role, "onay")
     _need_user(user)
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         eski = req["durum"]
@@ -415,7 +427,7 @@ def update_status(user: str, role: str, talep_id: str, yeni: str, not_: str = ""
 def mark_printed(user: str, role: str, talep_id: str) -> None:
     _need(role, "cikti")
     _need_user(user)
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         if req["durum"] != S_APPROVED:
@@ -434,7 +446,7 @@ def mark_delivered(user: str, role: str, talep_id: str, tarih: date, alan: str) 
         raise ValueError("Teslim alan İK personelinin adı zorunludur.")
     if tarih > now().date():
         raise ValueError("Teslim tarihi gelecekte olamaz.")
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         if req["durum"] != S_APPROVED:
@@ -466,7 +478,7 @@ def correct_delivery(user: str, role: str, talep_id: str, tarih: date, alan: str
         raise ValueError("Teslim alan İK personelinin adı zorunludur.")
     if tarih > now().date():
         raise ValueError("Teslim tarihi gelecekte olamaz.")
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         if not req["ik_teslim"]:
@@ -483,7 +495,7 @@ def revoke_delivery(user: str, role: str, talep_id: str, gerekce: str) -> None:
     _need_user(user)
     if not gerekce.strip():
         raise ValueError("Geri alma gerekçesi zorunludur.")
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         if not req["ik_teslim"]:
@@ -500,7 +512,7 @@ def mark_sap(user: str, role: str, talep_id: str, tarih: date, not_: str = "") -
     _need_user(user)
     if tarih > now().date():
         raise ValueError("SAP giriş tarihi gelecekte olamaz.")
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         if req["durum"] != S_APPROVED:
@@ -519,7 +531,7 @@ def revoke_sap(user: str, role: str, talep_id: str, gerekce: str) -> None:
     _need_user(user)
     if not gerekce.strip():
         raise ValueError("Geri alma gerekçesi zorunludur.")
-    with data_lock():
+    with _tx():
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         if not req["sap_girildi"]:
@@ -539,6 +551,8 @@ def history(talep_id: str) -> list[dict[str, Any]]:
 # Aşamalar, kuyruklar, uyarılar
 # ----------------------------------------------------------------------------
 def stage(r: Request) -> str:
+    if r.get("silindi"):
+        return "Silindi"
     if r["durum"] == S_PENDING:
         return "Onay bekliyor"
     if r["durum"] != S_APPROVED:
@@ -597,7 +611,7 @@ def alerts(requests: list[Request] | None = None, settings: dict[str, Any] | Non
 # ----------------------------------------------------------------------------
 REQ_COLS = ["id", "personel_adi", "izin_turu", "baslangic", "bitis", "gun_sayisi", "is_gunu", "durum", "asama",
             "cikti_alindi", "ik_teslim", "ik_teslim_tarihi", "ik_teslim_alan", "sap_girildi", "sap_tarihi",
-            "ek_sayisi", "aciklama", "olusturan", "olusturma_zamani", "karar_veren", "onay_zamani", "son_guncelleme"]
+            "ek_sayisi", "aciklama", "olusturan", "olusturma_zamani", "karar_veren", "onay_zamani", "son_guncelleme", "silindi"]
 
 
 def requests_df(requests: list[Request]) -> pd.DataFrame:
@@ -611,6 +625,7 @@ def requests_df(requests: list[Request]) -> pd.DataFrame:
             "sap_girildi": bool(r["sap_girildi"]), "sap_tarihi": r["sap_tarihi"], "ek_sayisi": len(r["ekler"]),
             "aciklama": r["aciklama"], "olusturan": r["olusturan"], "olusturma_zamani": r["olusturma_zamani"],
             "karar_veren": r["karar_veren"], "onay_zamani": r["onay_zamani"], "son_guncelleme": r["son_guncelleme"],
+            "silindi": bool(r["silindi"]),
         })
     df = pd.DataFrame(rows, columns=REQ_COLS)
     for c in ["baslangic", "bitis", "ik_teslim_tarihi", "sap_tarihi", "olusturma_zamani", "onay_zamani", "son_guncelleme"]:
@@ -659,7 +674,7 @@ def import_requests(user: str, role: str, df: pd.DataFrame) -> tuple[list[str], 
 
 
 def export_excel() -> bytes:
-    reqs = load_requests()
+    reqs = load_requests(include_deleted=True)
     df = requests_df(reqs)
     for c in ["baslangic", "bitis", "ik_teslim_tarihi", "sap_tarihi"]:
         df[c] = df[c].dt.strftime("%d.%m.%Y")
@@ -687,6 +702,70 @@ def df_to_excel(frames: dict[str, pd.DataFrame]) -> bytes:
 def integrity_report() -> dict[str, Any]:
     logs = audit.logs_store.read()
     return {"chain": audit.verify_chain(logs, audit.anchors_store.read()),
-            "consistency": audit.verify_consistency(load_requests(), logs),
+            "consistency": audit.verify_consistency(load_requests(include_deleted=True), logs),
             "key_source": audit.key_source(), "log_count": len(logs),
             "anchor_count": len(audit.anchors_store.read())}
+
+
+# ----------------------------------------------------------------------------
+# Silme (arşive kaldırma) ve geri yükleme
+# ----------------------------------------------------------------------------
+def delete_request(user: str, role: str, talep_id: str, gerekce: str) -> None:
+    """Talebi arşive kaldırır: listelerden, bakiyeden, takvimden ve uyarılardan çıkar; kayıt ve log saklanır."""
+    _need(role, "sil")
+    _need_user(user)
+    if not gerekce.strip():
+        raise ValueError("Silme gerekçesi zorunludur.")
+    with _tx():
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id)
+        asama = stage(req)
+        req.update(silindi=True, silinme_zamani=now_str(), silen=user, silme_gerekcesi=gerekce.strip(),
+                   son_guncelleyen=user, son_guncelleme=now_str())
+        requests_store.write(requests)
+        audit.append_log(user, role, talep_id, "Talep Silindi", req["durum"], req["durum"],
+                         f"Gerekçe: {gerekce.strip()} | Silinmeden önceki aşama: {asama} | "
+                         f"{req['personel_adi']} {req['baslangic']} → {req['bitis']}")
+
+
+def restore_request(user: str, role: str, talep_id: str, not_: str = "") -> None:
+    _need(role, "sil")
+    _need_user(user)
+    with _tx():
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id, allow_deleted=True)
+        if not req["silindi"]:
+            raise ValueError("Bu talep silinmiş değil.")
+        if req["durum"] in ACTIVE_STATUSES:
+            ov = find_overlap(load_requests(), req["personel_adi"], date.fromisoformat(req["baslangic"]),
+                              date.fromisoformat(req["bitis"]))
+            if ov:
+                raise ValueError(f"Geri yüklenemez: aynı personelin çakışan aktif talebi var ({ov['id']}).")
+        req.update(silindi=False, silinme_zamani=None, silen=None, silme_gerekcesi=None,
+                   son_guncelleyen=user, son_guncelleme=now_str())
+        requests_store.write(requests)
+        audit.append_log(user, role, talep_id, "Talep Geri Yüklendi", req["durum"], req["durum"], not_.strip())
+
+
+# ----------------------------------------------------------------------------
+# Şema geçişi ve yedekten geri dönme
+# ----------------------------------------------------------------------------
+def migrate() -> None:
+    """Eski sürümlerde oluşmuş kayıtlara eksik alanları tamamlar (bir kez çalışır)."""
+    with _tx():
+        meta = meta_store.read()
+        if meta.get("schema_version", 1) >= SCHEMA_VERSION:
+            return
+        raw = requests_store.read()
+        if raw:
+            requests_store.write([_normalize(r) for r in raw])
+            audit.append_log("sistem", "Sistem", "-", "Şema Güncellendi", detay=f"v{meta.get('schema_version', 1)} → v{SCHEMA_VERSION}")
+        meta["schema_version"] = SCHEMA_VERSION
+        meta_store.write(meta)
+
+
+def restore_backup(user: str, role: str, name: str) -> None:
+    _need(role, "admin")
+    _need_user(user)
+    backup.restore(name)
+    audit.append_log(user, role, "-", "Yedekten Geri Yüklendi", detay=name)

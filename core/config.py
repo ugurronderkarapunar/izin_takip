@@ -44,15 +44,15 @@ ALLOWED_TRANSITIONS: dict[str, list[str]] = {
 }
 ACTIVE_STATUSES = {S_PENDING, S_APPROVED}
 
-STAGES = ["Onay bekliyor", "Çıktı bekliyor", "Teslim bekliyor", "SAP bekliyor", "Tamamlandı", "Kapalı"]
+STAGES = ["Onay bekliyor", "Çıktı bekliyor", "Teslim bekliyor", "SAP bekliyor", "Tamamlandı", "Kapalı", "Silindi"]
 
 # NOT: Roller kimlik doğrulama değildir; arayüzü sadeleştirir ve işlemleri loglar.
 ROLES = ["Personel", "Yönetici", "Planlama", "Admin"]
 PERMISSIONS: dict[str, set[str]] = {
     "Personel": {"talep_gir", "ek_ekle"},
     "Yönetici": {"talep_gir", "ek_ekle", "onay"},
-    "Planlama": {"talep_gir", "ek_ekle", "cikti", "teslim", "sap", "duzeltme", "import"},
-    "Admin": {"talep_gir", "ek_ekle", "onay", "cikti", "teslim", "sap", "duzeltme", "import", "admin"},
+    "Planlama": {"talep_gir", "ek_ekle", "cikti", "teslim", "sap", "duzeltme", "import", "sil"},
+    "Admin": {"talep_gir", "ek_ekle", "onay", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "admin"},
 }
 
 

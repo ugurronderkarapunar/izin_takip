@@ -4,6 +4,7 @@ Not: Doğrulama anahtarı (.audit_key) güvenlik nedeniyle yedeğe/ZIP'e KONMAZ;
 """
 from __future__ import annotations
 
+import os
 import shutil
 import zipfile
 from datetime import timedelta
@@ -11,7 +12,7 @@ from io import BytesIO
 from pathlib import Path
 
 from . import config
-from .storage import data_lock, log
+from .storage import clear_cache, data_lock, log
 from .utils import now
 
 _DATA_FILES = [config.REQUEST_DB, config.AUDIT_LOG, config.PERSONNEL_DB, config.HOLIDAY_DB,
@@ -67,3 +68,20 @@ def zip_bytes() -> bytes:
                 if p.is_file():
                     z.write(p, f"data/attachments/{p.relative_to(config.ATTACH_DIR).as_posix()}")
     return buf.getvalue()
+
+
+def restore(name: str) -> None:
+    """Seçilen yedeğe döner. Öncesinde otomatik güvenlik yedeği alınır."""
+    if name != Path(name).name or not (config.BACKUP_DIR / name).is_dir():
+        raise ValueError("Yedek bulunamadı.")
+    src = config.BACKUP_DIR / name
+    with data_lock():
+        backup_now("geri_yukleme_oncesi")
+        for f in _DATA_FILES:
+            b = src / f.name
+            if b.exists():
+                tmp = f.with_suffix(f.suffix + ".restore")
+                shutil.copyfile(b, tmp)  # yeni mtime: önbellek bayat kalmaz
+                os.replace(tmp, f)
+        clear_cache()
+        log.warning("Yedekten geri yüklendi: %s", name)
