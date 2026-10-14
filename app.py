@@ -1,6 +1,6 @@
 """
 İzin Takip ve Denetim Sistemi — giriş noktası.
-Çalıştırma:  streamlit run app.py
+Çalıştırma: streamlit run app.py
 """
 import time
 import uuid
