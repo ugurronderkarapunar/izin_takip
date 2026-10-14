@@ -131,12 +131,14 @@ def migrate() -> None:
 def integrity_report() -> dict[str, Any]:
     """Veri bütünlüğü kontrolü (Audit Trail ve zincir sağlığı)."""
     rep = audit.verify_chain()
-    if isinstance(rep, dict):
-        rep.setdefault("key_source", "Yerel Depo / Dosya Sistemi")
-        rep.setdefault("chain", [])
-        rep.setdefault("consistency", [])
-    else:
-        rep = {"chain": [], "consistency": [], "key_source": "Bilinmiyor"}
+    if not isinstance(rep, dict):
+        rep = {}
+    
+    rep.setdefault("key_source", "Yerel Depo / Dosya Sistemi")
+    rep.setdefault("chain", [])
+    rep.setdefault("consistency", [])
+    rep.setdefault("anchor_count", len(audit.anchors_store.read()) if hasattr(audit, "anchors_store") else 0)
+    rep.setdefault("log_count", len(audit.logs_store.read()) if hasattr(audit, "logs_store") else 0)
     return rep
 
 
