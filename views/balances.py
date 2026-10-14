@@ -1,6 +1,7 @@
 """Yıllık izin bakiyeleri."""
 from datetime import date
 
+import pandas as pd
 import streamlit as st
 
 from core import services
