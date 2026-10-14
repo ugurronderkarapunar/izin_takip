@@ -29,6 +29,7 @@ if config.APP_VERSION != EXPECTED_VERSION or getattr(ui, "UI_VERSION", None) != 
 
 _init()
 
+# Günlük yedekleme (services modülü güvenli biçimde burada çağrılır)
 if "_yedek_ok" not in st.session_state:
     from core import services
     backup.daily_backup(int(services.get_settings()["yedek_saklama_gun"]))
@@ -56,7 +57,7 @@ nav = st.navigation(sections)
 for w in storage.pop_warnings():
     st.warning(w)
 
-# Veri bütünlüğü özeti: services yerel (lazy) olarak yüklenir
+# Veri bütünlüğü özeti (services yalnızca ihtiyaç anında yüklenir)
 try:
     health = st.session_state.get("_saglik")
     if health is None or time.time() - health["t"] > 120:
