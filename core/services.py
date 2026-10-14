@@ -117,6 +117,20 @@ def migrate() -> None:
         meta_store.write(meta)
 
 
+def integrity_report() -> dict[str, Any]:
+    """Veri bütünlüğü kontrolü (Audit Trail ve zincir sağlığı)."""
+    return audit.verify_chain()
+
+
+def df_to_excel(dfs: dict[str, pd.DataFrame]) -> bytes:
+    """Birden fazla DataFrame'i tek bir Excel dosyasına (farklı sekmelere) yazar."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in dfs.items():
+            df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+    return output.getvalue()
+
+
 # ----------------------------------------------------------------------------
 # Ayarlar, kayıtlı filtreler
 # ----------------------------------------------------------------------------
@@ -387,3 +401,98 @@ def create_request(user: str, role: str, personel: str, tur: str, start: date, e
     personel = personel.strip()
     if not personel:
         raise ValueError("Personel adı boş olamaz.")
+    if tur not in LEAVE_TYPES:
+        raise ValueError("Geçersiz izin türü.")
+    ekler = ekler or []
+    for name, data in ekler:
+        _validate_attachment(name, data)
+    with _tx():
+        pv = preview_request(personel, tur, start, end)
+        if pv["errors"]:
+            raise ValueError(pv["errors"][0])
+        if pv["bakiye_yetersiz"] and not bakiye_override:
+            b = pv["bakiye"]
+            raise BalanceError(f"Yıllık izin bakiyesi yetersiz: kullanılabilir {b['kullanilabilir']:g} gün, talep {pv['is_gunu']} iş günü.")
+        if get_person(personel) is None:
+            _add_person_unlocked(user, role, personel)
+        requests = [_normalize(r) for r in requests_store.read()]
+        tid = _next_id(requests)
+        req: Request = {
+            "id": tid, "personel_adi": personel, "izin_turu": tur,
+            "baslangic": start.isoformat(), "bitis": end.isoformat(),
+            "gun_sayisi": pv["takvim_gun"], "is_gunu": pv["is_gunu"],
+            "aciklama": aciklama.strip(), "durum": S_PENDING,
+            "olusturan": user, "olusturma_zamani": now_str(),
+            "son_guncelleyen": user, "son_guncelleme": now_str(),
+        }
+        _normalize(req)
+        metas = [_store_attachment(user, req, n, d) for n, d in ekler]
+        requests.append(req)
+        requests_store.write(requests)
+        audit.append_log(user, role, tid, "Talep Oluşturuldu", "-", S_PENDING,
+                         f"{personel} | {tur} | {start.isoformat()} → {end.isoformat()} | {pv['is_gunu']} iş günü"
+                         + (" | bakiye aşımı onaylandı" if pv["bakiye_yetersiz"] else ""))
+        for m in metas:
+            audit.append_log(user, role, tid, "Ek Eklendi", detay=f"{m['orijinal_ad']} | sha256={m['sha256'][:16]}")
+    return tid
+
+
+def update_status(user: str, role: str, talep_id: str, yeni: str, not_: str = "") -> None:
+    _need(role, "onay")
+    _need_user(user)
+    with _tx():
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id)
+        eski = req["durum"]
+        if yeni not in ALLOWED_TRANSITIONS.get(eski, []):
+            raise ValueError(f"'{eski}' durumundan '{yeni}' durumuna geçiş yapılamaz.")
+        if yeni in (S_REJECTED, S_CANCELLED) and not not_.strip():
+            raise ValueError("Reddetme ve iptal işlemlerinde gerekçe zorunludur.")
+        req.update(durum=yeni, son_guncelleyen=user, son_guncelleme=now_str())
+        if yeni in (S_APPROVED, S_REJECTED):
+            req.update(onay_zamani=now_str(), karar_veren=user)
+        requests_store.write(requests)
+        audit.append_log(user, role, talep_id, "Durum Değişti", eski, yeni, not_.strip())
+
+
+def mark_printed(user: str, role: str, talep_id: str) -> None:
+    _need(role, "cikti")
+    _need_user(user)
+    with _tx():
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id)
+        if req["durum"] != S_APPROVED:
+            raise ValueError("Yalnızca 'Onaylandı' durumundaki talepler için çıktı alınabilir.")
+        if req["cikti_alindi"]:
+            raise ValueError("Çıktı zaten alındı olarak işaretli.")
+        req.update(cikti_alindi=True, cikti_zamani=now_str(), cikti_alan=user, son_guncelleyen=user, son_guncelleme=now_str())
+        requests_store.write(requests)
+        audit.append_log(user, role, talep_id, "Çıktı Alındı", req["durum"], req["durum"], "İzin kağıdı çıktısı alındı")
+
+
+def mark_delivered(user: str, role: str, talep_id: str, tarih: date, alan: str) -> None:
+    _need(role, "teslim")
+    _need_user(user)
+    if not alan.strip():
+        raise ValueError("Teslim alan İK personelinin adı zorunludur.")
+    if tarih > now().date():
+        raise ValueError("Teslim tarihi gelecekte olamaz.")
+    with _tx():
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id)
+        if req["durum"] != S_APPROVED:
+            raise ValueError("Yalnızca 'Onaylandı' durumundaki talepler için teslim işaretlenebilir.")
+        if not req["cikti_alindi"]:
+            raise ValueError("Önce 'çıktı alındı' adımı tamamlanmalı.")
+        if req["ik_teslim"]:
+            raise ValueError("Teslim zaten kayıtlı. Hata varsa 'Teslimi düzelt / geri al' kullanın.")
+        req.update(ik_teslim=True, ik_teslim_tarihi=tarih.isoformat(), ik_teslim_alan=alan.strip(),
+                   son_guncelleyen=user, son_guncelleme=now_str())
+        requests_store.write(requests)
+        audit.append_log(user, role, talep_id, "İK Teslim", req["durum"], req["durum"],
+                         f"Teslim tarihi: {tarih.isoformat()} | Teslim alan: {alan.strip()}")
+
+
+def _push_delivery_history(req: Request, islem: str, user: str, gerekce: str) -> str:
+    old = f"{req['ik_teslim_tarihi']} / {req['ik_teslim_alan']}"
+    req["teslim_gecmisi"].append({"islem
