@@ -229,7 +229,7 @@ def _add_person_unlocked(user: str, role: str, ad: str, hak: float | None = None
               "devreden": 0, "hak_yillik": {},
               "devreden_yillik": {str(now().year): devreden} if devreden else {}, "aktif": True}
     people.append(person)
-    personnel_store.write(people)
+    personnel_store.write(person)
     audit.append_log(user, role, "-", "Personel Eklendi", detay=f"{person['ad']} | hak={person['yillik_hak']} devreden={devreden}")
     return person
 
@@ -512,3 +512,45 @@ def mark_delivered(user: str, role: str, talep_id: str, tarih: date, alan: str) 
     _need(role, "teslim")
     _need_user(user)
     if not alan.strip():
+        raise ValueError("Teslim alan İK personelinin adı zorunludur.")
+    if tarih > now().date():
+        raise ValueError("Teslim tarihi gelecekte olamaz.")
+    with _tx():
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id)
+        if req["durum"] != S_APPROVED:
+            raise ValueError("Yalnızca 'Onaylandı' durumundaki talepler için teslim işaretlenebilir.")
+        if not req["cikti_alindi"]:
+            raise ValueError("Önce 'çıktı alındı' adımı tamamlanmalı.")
+        if req["ik_teslim"]:
+            raise ValueError("Teslim zaten kayıtlı. Hata varsa 'Teslimi düzelt / geri al' kullanın.")
+        req.update(ik_teslim=True, ik_teslim_tarihi=tarih.isoformat(), ik_teslim_alan=alan.strip(),
+                   son_guncelleyen=user, son_guncelleme=now_str())
+        requests_store.write(requests)
+        audit.append_log(user, role, talep_id, "İK Teslim", req["durum"], req["durum"],
+                         f"Teslim tarihi: {tarih.isoformat()} | Teslim alan: {alan.strip()}")
+
+
+def _push_delivery_history(req: Request, islem: str, user: str, gerekce: str) -> str:
+    old = f"{req['ik_teslim_tarihi']} / {req['ik_teslim_alan']}"
+    req["teslim_gecmisi"].append({
+        "islem": islem,
+        "eski_tarih": req["ik_teslim_tarihi"],
+        "eski_alan": req["ik_teslim_alan"],
+        "gerekce": gerekce,
+        "kullanici": user,
+        "zaman": now_str()
+    })
+    return old
+
+
+def correct_delivery(user: str, role: str, talep_id: str, tarih: date, alan: str, gerekce: str) -> None:
+    _need(role, "duzeltme")
+    _need_user(user)
+    if not gerekce.strip():
+        raise ValueError("Düzeltme gerekçesi zorunludur.")
+    if not alan.strip():
+        raise ValueError("Teslim alan İK personelinin adı zorunludur.")
+    if tarih > now().date():
+        raise ValueError("Teslim tarihi gelecekte olamaz.")
+    with _tx():
