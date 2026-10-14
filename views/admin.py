@@ -16,25 +16,61 @@ t_per, t_set, t_hol, t_bak, t_sec = st.tabs(["👥 Personel", "🎛️ Ayarlar",
 
 with t_per:
     people = services.list_personnel()
+    yil = st.selectbox("Yıl", list(range(date.today().year - 1, date.today().year + 3)), index=1, key="pe_year",
+                       help="Tablo ve izin hakkı düzenleme bu yıl için geçerlidir.")
     if people:
-        df = pd.DataFrame(people).reindex(columns=["ad", "ekip", "telefon", "yillik_hak", "devreden", "aktif"])
-        df[["ekip", "telefon"]] = df[["ekip", "telefon"]].fillna("")
-        edited = st.data_editor(df, hide_index=True, width="stretch", num_rows="fixed", disabled=["ad"], key="pers_editor",
-                                column_config={"ad": "Personel", "ekip": "Ekip", "telefon": "Telefon",
-                                               "yillik_hak": st.column_config.NumberColumn("Yıllık hak", min_value=0, step=1),
-                                               "devreden": st.column_config.NumberColumn("Devreden", min_value=0, step=1),
-                                               "aktif": st.column_config.CheckboxColumn("Aktif")})
-        st.caption("Personel silinmez; ayrılanlar 'Aktif' işaretinin kaldırılmasıyla pasife alınır. Değişiklikler loglanır.")
-        if st.button("Değişiklikleri kaydet", key="pers_save", type="primary"):
-            n = 0
-            for i, row in edited.iterrows():
-                orig = df.loc[i]
-                fields = {c: (bool(row[c]) if c == "aktif" else (str(row[c]) if c in ("ekip", "telefon") else float(row[c])))
-                          for c in ["ekip", "telefon", "yillik_hak", "devreden", "aktif"] if row[c] != orig[c]}
-                if fields and ui.run(services.update_personnel, row["ad"], ok_msg="Personel güncellendi", **fields):
-                    n += 1
-            if n:
+        bt = services.balance_table(yil)
+        st.dataframe(bt, hide_index=True, width="stretch", column_config={"Aktif": st.column_config.CheckboxColumn("Aktif")})
+
+        st.markdown("**Personeli düzenle**")
+        if "_pe_next" in st.session_state:  # yeniden adlandırma sonrası seçimi yeni ada taşı
+            st.session_state["pe_person"] = st.session_state.pop("_pe_next")
+        names = [p["ad"] for p in people]
+        sel = st.selectbox("Personel", names, key="pe_person")
+        p = services.get_person(sel)
+        b = services.balance_for(sel, yil)
+        kb = lambda n: f"pe_{sel}_{yil}_{n}"  # noqa: E731  (kişi/yıl değişince alanlar yeniden doldurulur)
+        with st.form("pe_form"):
+            c1, c2, c3 = st.columns(3)
+            yeni_ad = c1.text_input("Ad soyad", sel, key=kb("ad"))
+            ekip = c2.text_input("Ekip", p.get("ekip", ""), key=kb("ekip"))
+            tel = c3.text_input("Telefon", p.get("telefon", ""), key=kb("tel"))
+            h1, h2, h3 = st.columns(3)
+            hak = h1.number_input(f"{yil} yıllık izin hakkı (gün)", 0.0, 366.0, float(b["hak"]), step=0.5, format="%.1f", key=kb("hak"))
+            dev = h2.number_input(f"{yil} devreden (gün)", 0.0, 366.0, float(b["devreden"]), step=0.5, format="%.1f", key=kb("dev"))
+            aktif = h3.checkbox("Aktif personel", p.get("aktif", True), key=kb("aktif"))
+            gerekce = st.text_input("Not / gerekçe (isteğe bağlı)", key=kb("not"))
+            kaydet = st.form_submit_button("💾 Kaydet", type="primary")
+        st.caption(f"{yil} için şu an: hak {b['hak']:g} · devreden {b['devreden']:g} · kullanılan {b['kullanilan']:g} · "
+                   f"kalan {b['kalan']:g}. Hak ve devreden değişikliği **yalnızca {yil} yılını** etkiler. Personel silinmez; ayrılanlar pasife alınır.")
+        if kaydet:
+            msgs: list[str] = []
+            ok = True
+            if (hak, dev) != (float(b["hak"]), float(b["devreden"])):
+                ok = ui.run(services.set_year_entitlement, sel, yil, hak, dev, gerekce, ok_msg="")
+                if ok:
+                    msgs.append(f"{yil} hakkı {b['hak']:g} → {hak:g}, devreden {b['devreden']:g} → {dev:g}")
+            profile = {}
+            if ekip.strip() != p.get("ekip", ""):
+                profile["ekip"] = ekip.strip()
+            if tel.strip() != p.get("telefon", ""):
+                profile["telefon"] = tel.strip()
+            if aktif != p.get("aktif", True):
+                profile["aktif"] = aktif
+            if ok and profile:
+                ok = ui.run(services.update_personnel, sel, not_=gerekce, ok_msg="", **profile)
+                if ok:
+                    msgs.append("bilgiler güncellendi (" + ", ".join(profile) + ")")
+            if ok and yeni_ad.strip() != sel:
+                ok = ui.run(services.rename_personnel, sel, yeni_ad.strip(), ok_msg="")
+                if ok:
+                    msgs.append(f"ad: {sel} → {yeni_ad.strip()}")
+                    st.session_state["_pe_next"] = yeni_ad.strip()
+            if ok and msgs:
+                ui.flash(f"{sel}: " + " · ".join(msgs))
                 st.rerun()
+            elif ok:
+                st.info("Değişiklik yok.")
     with st.form("pers_add", clear_on_submit=False):
         st.markdown("**Yeni personel ekle**")
         a1, a2, a3, a4, a5 = st.columns(5)
@@ -42,7 +78,7 @@ with t_per:
         ekip = a2.text_input("Ekip")
         tel = a3.text_input("Telefon")
         hak = a4.number_input("Yıllık hak", 0, 60, int(services.get_settings()["yillik_hak_varsayilan"]))
-        dev = a5.number_input("Devreden", 0, 60, 0)
+        dev = a5.number_input(f"{date.today().year} devreden", 0, 60, 0)
         if st.form_submit_button("Ekle") and ui.run(services.add_personnel, ad, hak, dev, tel, ekip, ok_msg=f"{ad} eklendi"):
             st.rerun()
 

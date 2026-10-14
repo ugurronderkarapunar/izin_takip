@@ -28,4 +28,4 @@ st.dataframe(df, hide_index=True, width="stretch", column_config={
 })
 st.download_button("⬇️ Excel", services.df_to_excel({f"Bakiye {yil}": df}), f"bakiyeler_{yil}.xlsx",
                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Bakiye yalnızca 'Yıllık İzin' türünü kapsar; hesap iş günü üzerinden yapılır (hafta sonu ve resmî tatiller düşülür).")
+st.caption("Hak ve devreden değerleri Yönetim > Personel sayfasından, yıl bazında düzenlenir. Bakiye yalnızca 'Yıllık İzin' türünü kapsar; hesap iş günü üzerinden yapılır (hafta sonu ve resmî tatiller düşülür).")
