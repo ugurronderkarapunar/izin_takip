@@ -151,6 +151,17 @@ def df_to_excel(dfs: dict[str, pd.DataFrame]) -> bytes:
     return output.getvalue()
 
 
+def export_excel() -> bytes:
+    """Raporlar ve dışa aktarım ekranı için tüm temel veri setlerini Excel'e döker."""
+    dfs = {
+        "Talepler": requests_df(load_requests(include_deleted=True)),
+        "Personel": balance_table(now().year),
+        "Audit Log": pd.DataFrame(audit.logs_store.read()),
+        "Tatiller": pd.DataFrame(calendar_utils.holidays_store.read()),
+    }
+    return df_to_excel(dfs)
+
+
 # ----------------------------------------------------------------------------
 # Ayarlar, kayıtlı filtreler
 # ----------------------------------------------------------------------------
