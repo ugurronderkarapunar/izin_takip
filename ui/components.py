@@ -322,7 +322,7 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
             c[0].write(f"📎 {e['orijinal_ad']} · {max(e['boyut'] // 1024, 1)} KB · {e['yukleyen']} · {fmt_dt(e['zaman'])}")
             try:
                 c[1].download_button("İndir", services.read_attachment(r["id"], e["dosya"]),
-                                     file_name=e["orijinal_ad"], key=k(f"ek{i}"))
+                                   file_name=e["orijinal_ad"], key=k(f"ek{i}"))
             except FileNotFoundError:
                 c[1].error("Dosya bulunamadı")
     with t_gecmis:
