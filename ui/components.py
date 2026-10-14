@@ -6,6 +6,7 @@ from typing import Callable
 
 import pandas as pd
 import streamlit as st
+from filelock import Timeout
 
 from core import config, documents, services
 from core.config import S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED, STATUS_ICON
@@ -52,15 +53,25 @@ def run(fn: Callable, *args, ok_msg: str, **kwargs) -> bool:
         return False
     try:
         fn(current_user(), current_role(), *args, **kwargs)
+    except Timeout:
+        st.error("Veri dosyası şu an başka bir işlem tarafından kullanılıyor. Birkaç saniye sonra tekrar deneyin.")
+        return False
     except (ValueError, PermissionError, OSError) as exc:
         st.error(str(exc))
         return False
+    st.session_state.pop("_saglik", None)  # bütünlük özeti yeniden hesaplansın
     flash(ok_msg)
     return True
 
 
-def status_label(durum: str) -> str:
-    return f"{STATUS_ICON.get(durum, '')} {durum}"
+def status_label(durum: str, silindi: bool = False) -> str:
+    return "🗑️ Silindi" if silindi else f"{STATUS_ICON.get(durum, '')} {durum}"
+
+
+def reset_table_selection() -> None:
+    """Liste değiştiğinde (silme/geri yükleme) eski satır seçiminin başka talebi açmasını önler."""
+    st.session_state["tablo_nonce"] = st.session_state.get("tablo_nonce", 0) + 1
+    st.session_state["_son_secim"] = None
 
 
 def open_request(talep_id: str) -> None:
@@ -146,6 +157,32 @@ def dialog_sap(talep_id: str, revoke: bool = False) -> None:
             st.rerun()
 
 
+@st.dialog("Talebi sil")
+def dialog_delete(talep_id: str) -> None:
+    r = services.get_request(talep_id)
+    _summary(r)
+    risky = r["durum"] == S_APPROVED or r["ik_teslim"] or r["sap_girildi"]
+    if risky:
+        st.warning("Bu izin onaylanmış" + (", İK'ya teslim edilmiş" if r["ik_teslim"] else "")
+                   + (" ve SAP'ye girilmiş" if r["sap_girildi"] else "")
+                   + ". Sonradan uyuşmazlık çıkmaması için silmek yerine **İptal Edildi** durumu önerilir.")
+    st.info("Silinen talep listelerden, bakiyeden, takvimden ve uyarılardan kalkar. Kayıt ve log arşivde saklanır; "
+            "'Silinenleri göster' ile bulunup geri yüklenebilir.")
+    gerekce = st.text_area("Silme gerekçesi *", key=f"dlg_dg_{talep_id}")
+    anladim = st.checkbox("Riski anladım, yine de silmek istiyorum", key=f"dlg_dk_{talep_id}") if risky else True
+    c1, c2 = st.columns(2)
+    if c1.button("Vazgeç", key=f"dlg_dc_{talep_id}", width="stretch"):
+        st.rerun()
+    if c2.button("🗑️ Sil", type="primary", key=f"dlg_dok_{talep_id}", width="stretch"):
+        if not gerekce.strip():
+            st.error("Silme gerekçesi zorunludur.")
+        elif not anladim:
+            st.error("Devam etmek için onay kutusunu işaretleyin.")
+        elif run(services.delete_request, talep_id, gerekce, ok_msg=f"{talep_id} silindi (arşive kaldırıldı)"):
+            reset_table_selection()
+            st.rerun()
+
+
 @st.dialog("Ek dosya ekle")
 def dialog_attach(talep_id: str) -> None:
     files = st.file_uploader("Dosya(lar)", accept_multiple_files=True, key=f"dlg_up_{talep_id}",
@@ -183,37 +220,49 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
         st.warning("Talep bulunamadı.")
         return
     k = lambda a: f"{key_prefix}_{a}_{talep_id}"  # noqa: E731
+    deleted = bool(r["silindi"])
+    approved = r["durum"] == S_APPROVED and not deleted
 
     st.subheader(f"{r['id']} · {r['personel_adi']}")
-    st.markdown(f"**{status_label(r['durum'])}** · {r['izin_turu']} · {fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} "
+    if deleted:
+        st.error(f"🗑️ **Silinmiş talep** — {r['silen']} · {fmt_dt(r['silinme_zamani'])}\n\nGerekçe: {r['silme_gerekcesi']}")
+    st.markdown(f"**{status_label(r['durum'], deleted)}** · {r['izin_turu']} · {fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} "
                 f"· **{r['is_gunu']} iş günü** ({r['gun_sayisi']} takvim günü)")
     if r["aciklama"]:
         st.caption(f"Açıklama: {r['aciklama']}")
     render_steps(r)
 
     actions: list[tuple[str, str, Callable[[], None]]] = []
-    approved = r["durum"] == S_APPROVED
-    if r["durum"] == S_PENDING and can("onay"):
-        actions += [("✅ Onayla", "ap", lambda: dialog_status(talep_id, S_APPROVED)),
-                    ("❌ Reddet", "rj", lambda: dialog_status(talep_id, S_REJECTED)),
-                    ("🚫 İptal et", "cn", lambda: dialog_status(talep_id, S_CANCELLED))]
-    if approved and can("onay"):
-        actions.append(("🚫 İptal et", "cn", lambda: dialog_status(talep_id, S_CANCELLED)))
-    if approved and not r["cikti_alindi"] and can("cikti"):
-        def _print() -> None:
-            if run(services.mark_printed, talep_id, ok_msg="Çıktı alındı olarak işaretlendi"):
+    if not deleted:
+        if r["durum"] == S_PENDING and can("onay"):
+            actions += [("✅ Onayla", "ap", lambda: dialog_status(talep_id, S_APPROVED)),
+                        ("❌ Reddet", "rj", lambda: dialog_status(talep_id, S_REJECTED)),
+                        ("🚫 İptal et", "cn", lambda: dialog_status(talep_id, S_CANCELLED))]
+        if approved and can("onay"):
+            actions.append(("🚫 İptal et", "cn", lambda: dialog_status(talep_id, S_CANCELLED)))
+        if approved and not r["cikti_alindi"] and can("cikti"):
+            def _print() -> None:
+                if run(services.mark_printed, talep_id, ok_msg="Çıktı alındı olarak işaretlendi"):
+                    st.rerun()
+            actions.append(("🖨️ Çıktı alındı", "pr", _print))
+        if approved and r["cikti_alindi"] and not r["ik_teslim"] and can("teslim"):
+            actions.append(("📨 İK'ya teslim et", "dl", lambda: dialog_deliver(talep_id)))
+        if r["ik_teslim"] and can("duzeltme"):
+            actions.append(("✏️ Teslimi düzelt / geri al", "fx", lambda: dialog_fix_delivery(talep_id)))
+        if approved and not r["sap_girildi"] and can("sap"):
+            actions.append(("🧾 SAP'ye girildi", "sp", lambda: dialog_sap(talep_id)))
+        if approved and r["sap_girildi"] and can("duzeltme"):
+            actions.append(("↩️ SAP işaretini geri al", "sr", lambda: dialog_sap(talep_id, revoke=True)))
+        if can("ek_ekle"):
+            actions.append(("📎 Ek ekle", "at", lambda: dialog_attach(talep_id)))
+        if can("sil"):
+            actions.append(("🗑️ Sil", "del", lambda: dialog_delete(talep_id)))
+    elif can("sil"):
+        def _restore() -> None:
+            if run(services.restore_request, talep_id, ok_msg=f"{talep_id} geri yüklendi"):
+                reset_table_selection()
                 st.rerun()
-        actions.append(("🖨️ Çıktı alındı", "pr", _print))
-    if approved and r["cikti_alindi"] and not r["ik_teslim"] and can("teslim"):
-        actions.append(("📨 İK'ya teslim et", "dl", lambda: dialog_deliver(talep_id)))
-    if r["ik_teslim"] and can("duzeltme"):
-        actions.append(("✏️ Teslimi düzelt / geri al", "fx", lambda: dialog_fix_delivery(talep_id)))
-    if approved and not r["sap_girildi"] and can("sap"):
-        actions.append(("🧾 SAP'ye girildi", "sp", lambda: dialog_sap(talep_id)))
-    if approved and r["sap_girildi"] and can("duzeltme"):
-        actions.append(("↩️ SAP işaretini geri al", "sr", lambda: dialog_sap(talep_id, revoke=True)))
-    if can("ek_ekle"):
-        actions.append(("📎 Ek ekle", "at", lambda: dialog_attach(talep_id)))
+        actions.append(("♻️ Geri yükle", "rs", _restore))
     for i in range(0, len(actions), 3):
         for col, (label, key, fn) in zip(st.columns(3), actions[i:i + 3]):
             if col.button(label, key=k(key), width="stretch"):
