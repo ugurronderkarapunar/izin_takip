@@ -19,6 +19,14 @@ def _init() -> bool:
     return True
 
 
+EXPECTED_VERSION = "2.2"
+from ui import components as ui  # noqa: E402
+
+if config.APP_VERSION != EXPECTED_VERSION or getattr(ui, "UI_VERSION", None) != EXPECTED_VERSION:
+    st.error("⚠️ **Dosya sürümleri uyuşmuyor.** `app.py`, `core/`, `ui/` ve `views/` klasörleri farklı sürümlerden karışmış. "
+             "Tüm klasörleri (özellikle `core/` ve `ui/`) en güncel zip'ten eksiksiz yükleyip uygulamayı yeniden başlatın.")
+    st.stop()
+
 _init()
 if "_yedek_ok" not in st.session_state:
     backup.daily_backup(int(services.get_settings()["yedek_saklama_gun"]))
@@ -45,8 +53,6 @@ if config.can(role, "admin"):
 nav = st.navigation(sections)
 for w in storage.pop_warnings():
     st.warning(w)
-from ui import components as ui  # noqa: E402
-
 # Veri bütünlüğü özeti: oturumda en geç 2 dakikada bir (ya da her başarılı işlemden sonra) yenilenir
 try:
     health = st.session_state.get("_saglik")

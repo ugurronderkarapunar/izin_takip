@@ -35,11 +35,26 @@ data/             ilk çalıştırmada oluşur (talepler, log, personel, tatille
 ## Süreç akışı
 
 Talep (Beklemede) → Karar (Onaylandı / Reddedildi / İptal) → Çıktı alındı → İK'ya teslim → SAP girişi.
-Her adım kim/ne zaman ile loglanır. Teslim yanlış girildiyse **gerekçeli düzeltme / geri alma** vardır; eski kayıt `teslim_gecmisi` ve logda kalır, hiçbir kayıt silinmez.
+Her adım kim/ne zaman ile loglanır. Teslim yanlış girildiyse **gerekçeli düzeltme / geri alma** vardır; eski kayıt `teslim_gecmisi` ve logda kalır.
+
+### Düzenleme
+- **İzin hakkı (Yönetim > Personel):** Personel seçilir, yıl seçilir, hak ve devreden gün düzenlenip **Kaydet**'e basılır. Değişiklik yalnızca seçili yılı etkiler (geçmiş yıl bakiyeleri bozulmaz), loga "önceki → yeni" olarak işlenir. Ad soyad, ekip, telefon ve aktiflik de aynı formdan düzenlenir; ad değişince o personelin tüm taleplerindeki isim de güncellenir.
+- **Talep düzenleme (✏️ Düzenle):** Tür, tarih ve açıklama düzenlenir; çakışma, bakiye ve ekip yoğunluğu kontrolleri yeniden yapılır. Onaylı talepte gerekçe zorunludur ve tür/tarih değişirse talep yeniden onaya düşer. Çıktısı alınmış, teslim edilmiş, SAP'ye girilmiş veya kapanmış talepler düzenlenemez (iptal edip yeni talep açılır).
+
+### Talep silme (arşive kaldırma)
+Talep detayındaki **🗑️ Sil** gerekçe ister (Planlama ve Admin). Silinen talep listelerden, bakiyeden, takvimden, raporlardan ve uyarılardan kalkar; aynı tarihlere yeniden talep girilebilir. Kayıt ve log arşivde saklanır: *Talepler > Silinenleri göster* ile bulunup **♻️ Geri yükle** ile döndürülebilir (çakışan aktif talep varsa geri yüklenmez). Onaylı / teslim edilmiş izinlerde sistem silmek yerine *İptal Edildi* önerir ve ek onay ister. Fiziksel (kalıcı) silme bilinçli olarak yoktur; çünkü uyuşmazlık kanıtını ortadan kaldırır.
+
+## Kararlılık
+
+- **İşlem bütünlüğü (rollback):** Her yazma işlemi tüm veri dosyalarını kapsayan bir işlemdir; ortasında hata olursa (ör. log yazılamadı) talep, log, sayaç ve diğer dosyalar eski haline döner.
+- **Genel hata yakalama:** Beklenmeyen hatada ham hata ekranı yerine hata kodlu mesaj gösterilir, ayrıntı `data/app.log`'a yazılır. Dosya kilidi meşgulse anlaşılır uyarı verilir.
+- **Açılışta bütünlük kontrolü:** Log zinciri ve talep-log tutarlılığı kontrol edilir; sorun varsa her sayfada kırmızı uyarı çıkar.
+- **Şema geçişi:** Eski sürümden gelen kayıtlara eksik alanlar bir kez tamamlanır.
+- **Yedekten geri dönme:** Yönetim > Yedek; öncesinde otomatik güvenlik yedeği alınır, olay loglanır.
 
 ## Veri kaybı olmaması için
 
-- Talepler **hiçbir yerde silinemez**; yalnızca durum değişir.
+- Talepler dosyadan fiziksel olarak silinmez; 'Sil' arşive kaldırır ve geri yüklenebilir.
 - Her yazma atomiktir (geçici dosya + `os.replace`) ve dosya kilidi altındadır.
 - Form hata verirse girilen bilgiler silinmez; yalnızca başarılı kayıttan sonra temizlenir.
 - Günün ilk açılışında otomatik yedek (`data/backups`, varsayılan 30 gün saklanır); Yönetim > Yedek'ten ZIP indirilebilir.
