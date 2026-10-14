@@ -250,3 +250,96 @@ def test_backup_restore_roundtrip():
         backup.restore("../etc")
     with pytest.raises(PermissionError):
         services.restore_backup(U, PLAN, name)
+
+
+# --------------------------- yıl bazlı hak, yeniden adlandırma, talep düzenleme ---------------------------
+def test_year_entitlement_only_affects_that_year():
+    services.add_personnel(U, PERS, "Hak Test", hak=20)
+    with pytest.raises(PermissionError):
+        services.set_year_entitlement(U, PLAN, "Hak Test", 2027, 25, 3)
+    services.set_year_entitlement(U, ADMIN, "Hak Test", 2027, 25, 3, "kıdem arttı")
+    b27, b26 = services.balance_for("Hak Test", 2027), services.balance_for("Hak Test", 2026)
+    assert (b27["hak"], b27["devreden"]) == (25, 3)
+    assert (b26["hak"], b26["devreden"]) == (20, 0)  # diğer yıl etkilenmedi
+    with pytest.raises(ValueError, match="0 ile 366"):
+        services.set_year_entitlement(U, ADMIN, "Hak Test", 2027, -1, 0)
+    assert any(e["islem"] == "İzin Hakkı Güncellendi" and "20 → 25" in e["detay"] for e in audit.logs_store.read())
+    n = len(audit.logs_store.read())
+    services.set_year_entitlement(U, ADMIN, "Hak Test", 2027, 25, 3)  # değişiklik yok -> log yok
+    assert len(audit.logs_store.read()) == n
+
+
+def test_update_personnel_persists():
+    services.add_personnel(U, PERS, "Profil Test", hak=20)
+    services.update_personnel(U, ADMIN, "Profil Test", not_="güncelleme", ekip="Makine", telefon="0532", aktif=False)
+    p = services.get_person("Profil Test")
+    assert (p["ekip"], p["telefon"], p["aktif"]) == ("Makine", "0532", False)
+
+
+def test_rename_personnel_updates_requests():
+    tid = _mk("Yazim Hatasi", weeks=30)
+    services.rename_personnel(U, ADMIN, "Yazim Hatasi", "Yazım Hatası")
+    assert services.get_request(tid)["personel_adi"] == "Yazım Hatası"
+    assert services.get_person("Yazim Hatasi") is None and services.get_person("Yazım Hatası")
+    with pytest.raises(ValueError, match="zaten var"):
+        services.rename_personnel(U, ADMIN, "Yazım Hatası", "hak test")
+    assert audit.verify_consistency(services.load_requests(include_deleted=True)) == []
+
+
+def test_edit_pending_request():
+    tid = _mk("Düzenle Bir", weeks=31, days=1)
+    s = _monday(31)
+    services.edit_request(U, MGR, tid, "Mazeret İzni", s, s + timedelta(days=2), "tarih uzatıldı")
+    r = services.get_request(tid)
+    assert r["is_gunu"] == 3 and r["aciklama"] == "tarih uzatıldı" and r["durum"] == S_PENDING
+    with pytest.raises(ValueError, match="Değişiklik yapılmadı"):
+        services.edit_request(U, MGR, tid, "Mazeret İzni", s, s + timedelta(days=2), "tarih uzatıldı")
+    with pytest.raises(PermissionError):
+        services.edit_request(U, PERS, tid, "Mazeret İzni", s, s, "x")
+
+
+def test_edit_ignores_self_overlap_but_blocks_other_overlap():
+    a = _mk("Düzenle İki", weeks=32, days=1)
+    b = _mk("Düzenle İki", weeks=33, days=1)
+    s = _monday(32)
+    services.edit_request(U, MGR, a, "Mazeret İzni", s, s + timedelta(days=1), "")  # kendisiyle çakışma sorun değil
+    with pytest.raises(ValueError, match="çakışan"):
+        services.edit_request(U, MGR, b, "Mazeret İzni", s + timedelta(days=1), s + timedelta(days=2), "")
+
+
+def test_edit_approved_resets_approval_and_blocks_after_print():
+    tid = _mk("Düzenle Üç", weeks=34, days=1)
+    services.update_status(U, MGR, tid, S_APPROVED)
+    s = _monday(34)
+    with pytest.raises(ValueError, match="gerekçe"):
+        services.edit_request(U, MGR, tid, "Mazeret İzni", s, s + timedelta(days=1), "")
+    # yalnız açıklama değişirse onay korunur
+    services.edit_request(U, MGR, tid, "Mazeret İzni", s, s, "not eklendi", "açıklama düzeltme")
+    assert services.get_request(tid)["durum"] == S_APPROVED
+    # tarih değişirse yeniden onaya düşer
+    services.edit_request(U, MGR, tid, "Mazeret İzni", s, s + timedelta(days=1), "not eklendi", "tarih hatalıydı")
+    r = services.get_request(tid)
+    assert r["durum"] == S_PENDING and r["onay_zamani"] is None
+    assert audit.verify_consistency(services.load_requests(include_deleted=True)) == []
+    # çıktısı alınmış talep düzenlenemez
+    services.update_status(U, MGR, tid, S_APPROVED)
+    services.mark_printed(U, PLAN, tid)
+    with pytest.raises(ValueError, match="düzenlenemez"):
+        services.edit_request(U, MGR, tid, "Mazeret İzni", s, s, "x", "y")
+    assert not services.can_edit_request(services.get_request(tid))
+
+
+def test_migration_moves_legacy_devreden_to_current_year():
+    from core.storage import meta_store
+    services.personnel_store.write(services.personnel_store.read() + [
+        {"ad": "Eski Kayıt", "ekip": "", "telefon": "", "yillik_hak": 20, "devreden": 6, "aktif": True}])
+    meta = meta_store.read()
+    meta["schema_version"] = 3
+    meta_store.write(meta)
+    services.migrate()
+    p = services.get_person("Eski Kayıt")
+    year = date.today().year
+    assert p["devreden"] == 0 and p["devreden_yillik"][str(year)] == 6
+    assert services.balance_for("Eski Kayıt", year)["devreden"] == 6
+    assert services.balance_for("Eski Kayıt", year + 1)["devreden"] == 0
+    assert meta_store.read()["schema_version"] == services.SCHEMA_VERSION
