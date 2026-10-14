@@ -29,10 +29,8 @@ if config.APP_VERSION != EXPECTED_VERSION or getattr(ui, "UI_VERSION", None) != 
 
 _init()
 
-# Döngüsel içe aktarmayı (circular import) önlemek için services, bootstrap.init() sonrasında yüklenir
-from core import services
-
 if "_yedek_ok" not in st.session_state:
+    from core import services
     backup.daily_backup(int(services.get_settings()["yedek_saklama_gun"]))
     st.session_state["_yedek_ok"] = True
 
@@ -48,7 +46,7 @@ sections: dict[str, list[st.Page]] = {
          + [st.Page("views/requests_list.py", title="Talepler", icon="📋")],
     "Planlama": [st.Page("views/team_calendar.py", title="Ekip Takvimi", icon="📅"),
                  st.Page("views/balances.py", title="Bakiyeler", icon="🧮")],
-    "Analiz dan Denetim": ([st.Page("views/reports.py", title="Raporlar", icon="📊")] if role != "Personel" else [])
+    "Analiz ve Denetim": ([st.Page("views/reports.py", title="Raporlar", icon="📊")] if role != "Personel" else [])
                          + [st.Page("views/audit_view.py", title="Audit Trail", icon="🛡️")],
 }
 if config.can(role, "admin"):
@@ -58,10 +56,11 @@ nav = st.navigation(sections)
 for w in storage.pop_warnings():
     st.warning(w)
 
-# Veri bütünlüğü özeti: oturumda en geç 2 dakikada bir (ya da her başarılı işlemden sonra) yenilenir
+# Veri bütünlüğü özeti: services yerel (lazy) olarak yüklenir
 try:
     health = st.session_state.get("_saglik")
     if health is None or time.time() - health["t"] > 120:
+        from core import services
         health = {"t": time.time(), "rep": services.integrity_report()}
         st.session_state["_saglik"] = health
     rep = health["rep"]
