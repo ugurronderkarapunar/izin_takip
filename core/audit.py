@@ -171,6 +171,8 @@ def verify_consistency(requests: list[dict[str, Any]], logs: list[dict[str, Any]
             s["sap"] = True
         elif op == "SAP Girişi Geri Alındı":
             s["sap"] = False
+        elif op == "Talep Düzenlendi":
+            s["durum"] = e["yeni_durum"]
         elif op == "Talep Silindi":
             s["silindi"] = True
         elif op == "Talep Geri Yüklendi":

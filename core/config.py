@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+APP_VERSION = "2.2"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 # Veriyi başka bir klasöre almak için: IZIN_DATA_DIR ortam değişkeni
 DATA_DIR = Path(os.environ.get("IZIN_DATA_DIR", BASE_DIR / "data"))
@@ -50,9 +52,9 @@ STAGES = ["Onay bekliyor", "Çıktı bekliyor", "Teslim bekliyor", "SAP bekliyor
 ROLES = ["Personel", "Yönetici", "Planlama", "Admin"]
 PERMISSIONS: dict[str, set[str]] = {
     "Personel": {"talep_gir", "ek_ekle"},
-    "Yönetici": {"talep_gir", "ek_ekle", "onay"},
-    "Planlama": {"talep_gir", "ek_ekle", "cikti", "teslim", "sap", "duzeltme", "import", "sil"},
-    "Admin": {"talep_gir", "ek_ekle", "onay", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "admin"},
+    "Yönetici": {"talep_gir", "ek_ekle", "onay", "duzenle"},
+    "Planlama": {"talep_gir", "ek_ekle", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "duzenle"},
+    "Admin": {"talep_gir", "ek_ekle", "onay", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "duzenle", "admin"},
 }
 
 
