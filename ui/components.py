@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from filelock import Timeout
 
-from core import config, documents, services
+from core import config
 from core.config import S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED, STATUS_ICON
 from core.utils import fmt_date, fmt_dt
 
@@ -92,6 +92,7 @@ def _summary(r: dict) -> None:
 
 @st.dialog("Durum güncelle")
 def dialog_status(talep_id: str, yeni: str) -> None:
+    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     st.write(f"{status_label(r['durum'])}  →  **{status_label(yeni)}**")
@@ -109,6 +110,7 @@ def dialog_status(talep_id: str, yeni: str) -> None:
 
 @st.dialog("İK'ya teslim")
 def dialog_deliver(talep_id: str) -> None:
+    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     confirm = st.checkbox("İzin kağıdının çıktısı alındı ve İK'ya teslim edildi", key=f"dlg_tc_{talep_id}")
@@ -124,6 +126,7 @@ def dialog_deliver(talep_id: str) -> None:
 
 @st.dialog("Teslim kaydını düzelt / geri al")
 def dialog_fix_delivery(talep_id: str) -> None:
+    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     st.info(f"Mevcut kayıt: {fmt_date(r['ik_teslim_tarihi'])} · {r['ik_teslim_alan']}")
@@ -144,6 +147,7 @@ def dialog_fix_delivery(talep_id: str) -> None:
 
 @st.dialog("SAP girişi")
 def dialog_sap(talep_id: str, revoke: bool = False) -> None:
+    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     if revoke:
@@ -161,6 +165,7 @@ def dialog_sap(talep_id: str, revoke: bool = False) -> None:
 
 @st.dialog("Talebi düzenle")
 def dialog_edit(talep_id: str) -> None:
+    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     k = lambda n: f"dlg_e{n}_{talep_id}"  # noqa: E731
@@ -192,6 +197,7 @@ def dialog_edit(talep_id: str) -> None:
 
 @st.dialog("Talebi sil")
 def dialog_delete(talep_id: str) -> None:
+    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     risky = r["durum"] == S_APPROVED or r["ik_teslim"] or r["sap_girildi"]
@@ -218,6 +224,7 @@ def dialog_delete(talep_id: str) -> None:
 
 @st.dialog("Ek dosya ekle")
 def dialog_attach(talep_id: str) -> None:
+    from core import services
     files = st.file_uploader("Dosya(lar)", accept_multiple_files=True, key=f"dlg_up_{talep_id}",
                              type=[e.strip(".") for e in sorted(config.ALLOWED_EXT)])
     st.caption(f"En fazla {config.MAX_UPLOAD_MB} MB. Eklenen dosyalar silinemez; SHA-256 özeti loga yazılır.")
@@ -248,6 +255,7 @@ def render_steps(r: dict) -> None:
 
 
 def render_detail(talep_id: str, key_prefix: str = "d") -> None:
+    from core import documents, services
     r = services.get_request(talep_id)
     if r is None:
         st.warning("Talep bulunamadı.")
