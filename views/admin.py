@@ -97,6 +97,15 @@ with t_bak:
                        "application/zip", width="stretch")
     st.write(f"Mevcut yedekler ({len(backup.list_backups())}):")
     st.code("\n".join(backup.list_backups()[:30]) or "—", language=None)
+    st.divider()
+    st.markdown("**Yedekten geri yükle**")
+    st.warning("Geri yükleme, seçilen yedekten sonra yapılan tüm kayıtları geri alır. İşlemden önce otomatik güvenlik yedeği alınır "
+               "ve olay loga yazılır. Audit sayfasındaki mühür, geri alınan kayıtları ortaya çıkarır.")
+    pick = st.selectbox("Yedek", backup.list_backups(), index=None, placeholder="Seçin…", key="rest_pick")
+    conf = st.text_input("Onaylamak için GERİ YÜKLE yazın", key="rest_conf")
+    if st.button("Yedeğe dön", key="rest_go", disabled=not (pick and conf.strip() == "GERİ YÜKLE")):
+        if ui.run(services.restore_backup, pick, ok_msg=f"{pick} yedeğine dönüldü"):
+            st.rerun()
 
 with t_sec:
     rep = services.integrity_report()

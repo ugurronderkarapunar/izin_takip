@@ -7,7 +7,9 @@ from core import config, services
 from ui import components as ui
 
 st.title("📋 Talepler")
-requests = services.load_requests()
+show_deleted = st.toggle("🗑️ Silinenleri göster", key="f_silinen", disabled=not ui.can("sil"),
+                         help="Silinen talepler arşivdedir; geri yüklenebilir.")
+requests = services.load_requests(include_deleted=show_deleted and ui.can("sil"))
 settings = services.get_settings()
 saved = settings["kayitli_filtreler"]
 df_all = services.requests_df(requests)
@@ -56,16 +58,16 @@ st.session_state["sayfa_no"] = min(st.session_state.get("sayfa_no", 1), pages)
 page = p2.number_input("Sayfa", min_value=1, max_value=pages, step=1, key="sayfa_no")
 p3.caption(f"{len(df)} kayıt · sayfa {page}/{pages}. Detay için satıra tıklayın (tekrar tıklayınca kapanır).")
 view = df.iloc[(page - 1) * size: page * size].copy()
-view["Durum"] = view["durum"].map(ui.status_label)
+view["Durum"] = view.apply(lambda r: ui.status_label(r["durum"], r["silindi"]), axis=1)
 view["Aşamalar"] = view.apply(lambda r: f"{'✅' if r['cikti_alindi'] else '⬜'} Çıktı · {'✅' if r['ik_teslim'] else '⬜'} Teslim · {'✅' if r['sap_girildi'] else '⬜'} SAP"
-                              if r["durum"] == config.S_APPROVED else "—", axis=1)
+                              if r["durum"] == config.S_APPROVED and not r["silindi"] else "—", axis=1)
 
 selected = st.session_state.get("secili_talep")
 left, right = st.columns([5, 4]) if selected else (st.container(), None)
 with left:
     event = st.dataframe(
         view[["id", "personel_adi", "izin_turu", "baslangic", "bitis", "is_gunu", "Durum", "Aşamalar", "ek_sayisi"]],
-        hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="liste_tablo",
+        hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key=f"liste_tablo_{st.session_state.get('tablo_nonce', 0)}",
         column_config={
             "id": "Talep ID", "personel_adi": "Personel", "izin_turu": "Tür",
             "baslangic": st.column_config.DateColumn("Başlangıç", format="DD.MM.YYYY"),
@@ -75,9 +77,7 @@ with left:
         },
     )
     rows = event.selection.rows
-    # GÜVENLİ HÂLİ: rows[0] değeri view'ın satır sayısından küçükse çalışır
-    sel_id = view.iloc[rows[0]]["id"] if rows and rows[0] < len(view) else None
-    
+    sel_id = view.iloc[rows[0]]["id"] if rows else None
     if sel_id != st.session_state.get("_son_secim"):
         st.session_state["_son_secim"] = sel_id
         st.session_state["secili_talep"] = sel_id
