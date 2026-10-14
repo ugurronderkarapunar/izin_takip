@@ -130,7 +130,14 @@ def migrate() -> None:
 
 def integrity_report() -> dict[str, Any]:
     """Veri bütünlüğü kontrolü (Audit Trail ve zincir sağlığı)."""
-    return audit.verify_chain()
+    rep = audit.verify_chain()
+    if isinstance(rep, dict):
+        rep.setdefault("key_source", "Yerel Depo / Dosya Sistemi")
+        rep.setdefault("chain", [])
+        rep.setdefault("consistency", [])
+    else:
+        rep = {"chain": [], "consistency": [], "key_source": "Bilinmiyor"}
+    return rep
 
 
 def df_to_excel(dfs: dict[str, pd.DataFrame]) -> bytes:
