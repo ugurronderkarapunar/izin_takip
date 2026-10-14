@@ -2,7 +2,11 @@
 İzin Takip ve Denetim Sistemi — giriş noktası.
 Çalıştırma:  streamlit run app.py
 """
+import time
+import uuid
+
 import streamlit as st
+from filelock import Timeout
 
 from core import backup, bootstrap, config, services, storage
 
@@ -43,5 +47,29 @@ for w in storage.pop_warnings():
     st.warning(w)
 from ui import components as ui  # noqa: E402
 
+# Veri bütünlüğü özeti: oturumda en geç 2 dakikada bir (ya da her başarılı işlemden sonra) yenilenir
+try:
+    health = st.session_state.get("_saglik")
+    if health is None or time.time() - health["t"] > 120:
+        health = {"t": time.time(), "rep": services.integrity_report()}
+        st.session_state["_saglik"] = health
+    rep = health["rep"]
+    if rep["chain"] or rep["consistency"]:
+        st.error("🚨 **Veri bütünlüğü uyarısı:** kayıtlarda tutarsızlık tespit edildi. Ayrıntı için *Audit Trail* sayfasına bakın; "
+                 "gerekirse Yönetim > Yedek'ten önceki bir yedeğe dönebilirsiniz.")
+except Exception:  # sağlık kontrolü uygulamayı asla düşürmemeli
+    storage.log.exception("Bütünlük kontrolü çalışmadı")
+
 ui.show_flash()
-nav.run()
+try:
+    nav.run()
+except Timeout:
+    st.error("Veri dosyası şu an başka bir işlem tarafından kullanılıyor. Birkaç saniye sonra tekrar deneyin.")
+except Exception as exc:  # Streamlit'in rerun/stop istisnaları BaseException'dır, buraya düşmez
+    err_id = uuid.uuid4().hex[:8]
+    storage.log.exception("Beklenmeyen hata [%s]", err_id)
+    st.error(f"Beklenmeyen bir hata oluştu (hata kodu: **{err_id}**). Kayıtlarınız korunmuştur; ayrıntı `data/app.log` dosyasındadır.")
+    if role == "Admin":
+        st.exception(exc)
+    if st.button("Sayfayı yenile"):
+        st.rerun()
