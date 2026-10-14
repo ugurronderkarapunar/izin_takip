@@ -8,9 +8,5 @@ def init() -> None:
     storage.ensure_dirs()
     storage.setup_logging()
     
-    # Döngüsel içe aktarma hatalarını önlemek için servisler burada yüklenir
-    from . import calendar_utils, services
-    
-    calendar_utils.ensure_holidays()
-    if hasattr(services, "migrate"):
-        services.migrate()
+    # Döngüsel içe aktarmaya yol açan calendar_utils ve services çağrıları 
+    # burada doğrudan yapılmaz; ihtiyaç duyulduğu ilgili view veya servis içinde çağrılır.
