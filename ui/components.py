@@ -8,11 +8,11 @@ import pandas as pd
 import streamlit as st
 from filelock import Timeout
 
-from core import config
+from core import config, documents, services
 from core.config import S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED, STATUS_ICON
 from core.utils import fmt_date, fmt_dt
 
-UI_VERSION = "2.2"
+UI_VERSION = "2.3"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
@@ -73,12 +73,12 @@ def status_label(durum: str, silindi: bool = False) -> str:
 def reset_table_selection() -> None:
     """Liste değiştiğinde (silme/geri yükleme) eski satır seçiminin başka talebi açmasını önler."""
     st.session_state["tablo_nonce"] = st.session_state.get("tablo_nonce", 0) + 1
-    st.session_state["_son_secim"] = None
+    st.session_state["_son_secim"] = ()
 
 
 def open_request(talep_id: str) -> None:
     st.session_state["secili_talep"] = talep_id
-    st.session_state["_son_secim"] = None
+    st.session_state["_son_secim"] = ()
     st.switch_page("views/requests_list.py")
 
 
@@ -92,7 +92,6 @@ def _summary(r: dict) -> None:
 
 @st.dialog("Durum güncelle")
 def dialog_status(talep_id: str, yeni: str) -> None:
-    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     st.write(f"{status_label(r['durum'])}  →  **{status_label(yeni)}**")
@@ -110,7 +109,6 @@ def dialog_status(talep_id: str, yeni: str) -> None:
 
 @st.dialog("İK'ya teslim")
 def dialog_deliver(talep_id: str) -> None:
-    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     confirm = st.checkbox("İzin kağıdının çıktısı alındı ve İK'ya teslim edildi", key=f"dlg_tc_{talep_id}")
@@ -126,7 +124,6 @@ def dialog_deliver(talep_id: str) -> None:
 
 @st.dialog("Teslim kaydını düzelt / geri al")
 def dialog_fix_delivery(talep_id: str) -> None:
-    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     st.info(f"Mevcut kayıt: {fmt_date(r['ik_teslim_tarihi'])} · {r['ik_teslim_alan']}")
@@ -147,7 +144,6 @@ def dialog_fix_delivery(talep_id: str) -> None:
 
 @st.dialog("SAP girişi")
 def dialog_sap(talep_id: str, revoke: bool = False) -> None:
-    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     if revoke:
@@ -165,7 +161,6 @@ def dialog_sap(talep_id: str, revoke: bool = False) -> None:
 
 @st.dialog("Talebi düzenle")
 def dialog_edit(talep_id: str) -> None:
-    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     k = lambda n: f"dlg_e{n}_{talep_id}"  # noqa: E731
@@ -197,7 +192,6 @@ def dialog_edit(talep_id: str) -> None:
 
 @st.dialog("Talebi sil")
 def dialog_delete(talep_id: str) -> None:
-    from core import services
     r = services.get_request(talep_id)
     _summary(r)
     risky = r["durum"] == S_APPROVED or r["ik_teslim"] or r["sap_girildi"]
@@ -224,7 +218,6 @@ def dialog_delete(talep_id: str) -> None:
 
 @st.dialog("Ek dosya ekle")
 def dialog_attach(talep_id: str) -> None:
-    from core import services
     files = st.file_uploader("Dosya(lar)", accept_multiple_files=True, key=f"dlg_up_{talep_id}",
                              type=[e.strip(".") for e in sorted(config.ALLOWED_EXT)])
     st.caption(f"En fazla {config.MAX_UPLOAD_MB} MB. Eklenen dosyalar silinemez; SHA-256 özeti loga yazılır.")
@@ -239,6 +232,92 @@ def dialog_attach(talep_id: str) -> None:
 # ----------------------------------------------------------------------------
 # Talep detay paneli
 # ----------------------------------------------------------------------------
+@st.dialog("Toplu işlem", width="large")
+def dialog_bulk(action: str, ids: list[str]) -> None:
+    label, _ = config.BULK_ACTIONS[action]
+    by_id = {r["id"]: r for r in services.load_requests()}
+    reqs = [by_id[i] for i in ids if i in by_id]
+    st.markdown(f"**{label}** · {len(reqs)} talep · {len({r['personel_adi'] for r in reqs})} personel")
+    st.dataframe(pd.DataFrame([{"Talep": r["id"], "Personel": r["personel_adi"], "Tür": r["izin_turu"],
+                                "Başlangıç": fmt_date(r["baslangic"]), "Bitiş": fmt_date(r["bitis"]), "İş günü": r["is_gunu"]}
+                               for r in reqs]), hide_index=True, width="stretch", height=min(38 + 35 * len(reqs), 260))
+    k = lambda n: f"dlg_b{n}_{action}"  # noqa: E731
+    note, tarih, alan = "", date.today(), ""
+    if action in ("reddet", "iptal"):
+        note = st.text_area("Gerekçe *", key=k("n"))
+    elif action == "onayla":
+        note = st.text_input("Not (isteğe bağlı)", key=k("n"))
+    elif action == "teslim":
+        c1, c2 = st.columns(2)
+        tarih = c1.date_input("Teslim tarihi", value=date.today(), max_value=date.today(), format="DD.MM.YYYY", key=k("d"))
+        alan = c2.text_input("Teslim alan İK personeli *", key=k("a"))
+    elif action == "sap":
+        c1, c2 = st.columns(2)
+        tarih = c1.date_input("SAP giriş tarihi", value=date.today(), max_value=date.today(), format="DD.MM.YYYY", key=k("d"))
+        note = c2.text_input("Not (isteğe bağlı)", key=k("n"))
+    onay = st.checkbox(f"{len(reqs)} talebe '{label}' işlemini uygulamak istiyorum", key=k("c"))
+    c1, c2 = st.columns(2)
+    if c1.button("Vazgeç", key=k("x"), width="stretch"):
+        st.rerun()
+    if c2.button("Uygula", type="primary", key=k("go"), width="stretch"):
+        if not onay:
+            st.error("Devam etmek için onay kutusunu işaretleyin.")
+            return
+        if not user_ok():
+            return
+        try:
+            res = services.bulk_apply(current_user(), current_role(), [r["id"] for r in reqs], action, note, tarih, alan)
+        except Timeout:
+            st.error("Veri dosyası şu an başka bir işlem tarafından kullanılıyor. Birkaç saniye sonra tekrar deneyin.")
+            return
+        except (ValueError, PermissionError, OSError) as exc:
+            st.error(str(exc))
+            return
+        st.session_state.pop("_saglik", None)
+        st.session_state["_bulk_report"] = {"label": label, **res}
+        reset_table_selection()
+        st.rerun()
+
+
+def render_bulk_panel(selected_ids: list[str], filtered_ids: list[str]) -> None:
+    """Tabloda seçilen ya da filtredeki tüm talepler için toplu işlem paneli."""
+    avail = {a: v for a, v in config.BULK_ACTIONS.items() if can(v[1])}
+    if not avail:
+        return
+    many = len(selected_ids) >= 2
+    title = "⚡ Toplu işlem" + (f" — {len(selected_ids)} talep seçili" if selected_ids else "")
+    with st.expander(title, expanded=many):
+        scopes = [f"Tabloda seçilenler ({len(selected_ids)})", f"Filtredeki tüm talepler ({len(filtered_ids)})"]
+        scope = st.radio("Kapsam", scopes, horizontal=True, index=0 if many else 1, key=f"bulk_scope_{many}",
+                         help="Personel filtresiyle birkaç kişiyi seçip 'Filtredeki tüm talepler'i uygulayabilirsiniz.")
+        ids = selected_ids if scope == scopes[0] else filtered_ids
+        action = st.selectbox("İşlem", list(avail), format_func=lambda a: avail[a][0], key="bulk_action")
+        by_id = {r["id"]: r for r in services.load_requests()}
+        eligible = [i for i in ids if i in by_id and services.bulk_eligible(by_id[i], action)]
+        st.caption(f"{len(ids)} talep → **{len(eligible)} uygun**, {len(ids) - len(eligible)} atlanacak "
+                   "(bu işleme uygun durumda olmayanlar).")
+        if eligible:
+            st.dataframe(pd.DataFrame([{"Talep": i, "Personel": by_id[i]["personel_adi"], "Tür": by_id[i]["izin_turu"],
+                                        "Başlangıç": fmt_date(by_id[i]["baslangic"]), "Bitiş": fmt_date(by_id[i]["bitis"]),
+                                        "İş günü": by_id[i]["is_gunu"]} for i in eligible[:100]]),
+                         hide_index=True, width="stretch", height=min(38 + 35 * len(eligible[:100]), 240))
+        if st.button(f"{avail[action][0]} — {len(eligible)} talebe uygula", type="primary", disabled=not eligible, key="bulk_go"):
+            dialog_bulk(action, eligible)
+
+
+def show_bulk_report() -> None:
+    rep = st.session_state.pop("_bulk_report", None)
+    if not rep:
+        return
+    if rep["ok"]:
+        st.success(f"{rep['label']}: {len(rep['ok'])} talep işlendi.")
+    if rep["failed"]:
+        st.error(f"{len(rep['failed'])} talep işlenemedi.")
+        with st.expander("Hata ayrıntıları", expanded=True):
+            for tid, msg in rep["failed"].items():
+                st.write(f"- **{tid}**: {msg}")
+
+
 def render_steps(r: dict) -> None:
     steps = [
         ("Talep", True, fmt_dt(r["olusturma_zamani"])),
@@ -255,7 +334,6 @@ def render_steps(r: dict) -> None:
 
 
 def render_detail(talep_id: str, key_prefix: str = "d") -> None:
-    from core import documents, services
     r = services.get_request(talep_id)
     if r is None:
         st.warning("Talep bulunamadı.")
@@ -330,7 +408,7 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
             c[0].write(f"📎 {e['orijinal_ad']} · {max(e['boyut'] // 1024, 1)} KB · {e['yukleyen']} · {fmt_dt(e['zaman'])}")
             try:
                 c[1].download_button("İndir", services.read_attachment(r["id"], e["dosya"]),
-                                   file_name=e["orijinal_ad"], key=k(f"ek{i}"))
+                                     file_name=e["orijinal_ad"], key=k(f"ek{i}"))
             except FileNotFoundError:
                 c[1].error("Dosya bulunamadı")
     with t_gecmis:
@@ -344,3 +422,5 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
                          width="stretch")
         else:
             st.caption("Kayıt yok.")
+
+# END-OF-FILE v2.3
