@@ -85,3 +85,5 @@ def restore(name: str) -> None:
                 os.replace(tmp, f)
         clear_cache()
         log.warning("Yedekten geri yüklendi: %s", name)
+
+# END-OF-FILE v2.3

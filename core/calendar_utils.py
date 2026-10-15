@@ -83,3 +83,5 @@ def daily_people(requests: Iterable[dict[str, Any]], start: date, end: date,
         for i in range((hi - lo).days + 1):
             out[lo + timedelta(days=i)].add(r["personel_adi"])
     return out
+
+# END-OF-FILE v2.3

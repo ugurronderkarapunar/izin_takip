@@ -149,3 +149,5 @@ def transaction(*stores: JsonStore) -> Iterator[None]:
                 except Exception:  # geri alma da başarısız olursa asıl hatayı gizleme
                     log.exception("Rollback başarısız: %s", store.path.name)
             raise
+
+# END-OF-FILE v2.3

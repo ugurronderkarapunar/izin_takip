@@ -28,3 +28,5 @@ def alert_message(alert: dict[str, Any]) -> tuple[str, str]:
     body = (f"Merhaba, {alert['personel']} adlı personelin {alert['talep_id']} numaralı izin kaydı için "
             f"işlem bekleniyor: {alert['mesaj']}. Bilgilerinize.")
     return subject, body
+
+# END-OF-FILE v2.3

@@ -101,3 +101,5 @@ def build_pdf(r: dict[str, Any], person: dict[str, Any]) -> bytes | None:
     pdf.cell(0, 6, f"Bu belge İzin Takip Sistemi tarafından {now_str()} tarihinde üretilmiştir. Talep No: {r['id']}",
              new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())
+
+# END-OF-FILE v2.3

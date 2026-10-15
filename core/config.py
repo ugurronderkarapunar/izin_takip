@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-APP_VERSION = "2.2"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
+APP_VERSION = "2.3"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 # Veriyi başka bir klasöre almak için: IZIN_DATA_DIR ortam değişkeni
@@ -57,6 +57,16 @@ PERMISSIONS: dict[str, set[str]] = {
     "Admin": {"talep_gir", "ek_ekle", "onay", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "duzenle", "admin"},
 }
 
+# Toplu işlemler: anahtar -> (etiket, gereken yetki)
+BULK_ACTIONS: dict[str, tuple[str, str]] = {
+    "onayla": ("✅ Onayla", "onay"),
+    "reddet": ("❌ Reddet", "onay"),
+    "iptal": ("🚫 İptal et", "onay"),
+    "cikti": ("🖨️ Çıktı alındı", "cikti"),
+    "teslim": ("📨 İK'ya teslim edildi", "teslim"),
+    "sap": ("🧾 SAP'ye girildi", "sap"),
+}
+
 
 def can(role: str, perm: str) -> bool:
     return perm in PERMISSIONS.get(role, set())
@@ -79,3 +89,5 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ik_telefon": "", "ik_eposta": "",
     "kayitli_filtreler": {},
 }
+
+# END-OF-FILE v2.3
