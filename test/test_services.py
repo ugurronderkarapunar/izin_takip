@@ -12,7 +12,11 @@ ADMIN, PLAN, MGR, PERS = "Admin", "Planlama", "Yönetici", "Personel"
 
 def _monday(offset_weeks: int = 0) -> date:
     d = date.today() + timedelta(days=30 + 7 * offset_weeks)
-    return d - timedelta(days=d.weekday())
+    d -= timedelta(days=d.weekday())
+    hol = calendar_utils.holiday_set()
+    while d in hol:  # resmî tatile denk gelen pazartesiyi atla
+        d += timedelta(days=7)
+    return d
 
 
 def _mk(name: str, tur="Mazeret İzni", weeks=0, days=1, **kw) -> str:
@@ -343,3 +347,43 @@ def test_migration_moves_legacy_devreden_to_current_year():
     assert services.balance_for("Eski Kayıt", year)["devreden"] == 6
     assert services.balance_for("Eski Kayıt", year + 1)["devreden"] == 0
     assert meta_store.read()["schema_version"] == services.SCHEMA_VERSION
+
+
+# --------------------------- toplu işlemler ---------------------------
+def test_bulk_approve_partial_and_permissions():
+    ids = [_mk(f"Toplu {i}", weeks=40 + i) for i in range(3)]
+    services.update_status(U, MGR, ids[2], S_REJECTED, "x")  # biri uygun değil
+    with pytest.raises(PermissionError):
+        services.bulk_apply(U, PLAN, ids, "onayla")
+    res = services.bulk_apply(U, MGR, ids + ids[:1], "onayla", "toplu onay")  # tekrar eden id tek sayılır
+    assert res["ok"] == ids[:2] and list(res["failed"]) == [ids[2]]
+    assert all(services.get_request(i)["durum"] == S_APPROVED for i in ids[:2])
+    assert services.get_request(ids[2])["durum"] == S_REJECTED
+    assert "[Toplu işlem: 3 talep]" in services.history(ids[0])[-1]["detay"]
+    assert audit.logs_store.read()[-1]["islem"] == "Toplu İşlem"
+    assert audit.verify_chain() == []
+    assert audit.verify_consistency(services.load_requests(include_deleted=True)) == []
+
+
+def test_bulk_requires_reason_and_inputs():
+    ids = [_mk(f"Toplu R {i}", weeks=50 + i) for i in range(2)]
+    with pytest.raises(ValueError, match="gerekçe"):
+        services.bulk_apply(U, MGR, ids, "reddet", "")
+    with pytest.raises(ValueError, match="seçilmedi"):
+        services.bulk_apply(U, MGR, [], "onayla")
+    res = services.bulk_apply(U, MGR, ids, "reddet", "kontenjan dolu")
+    assert len(res["ok"]) == 2 and all(services.get_request(i)["durum"] == S_REJECTED for i in ids)
+
+
+def test_bulk_print_deliver_sap_chain():
+    ids = [_mk(f"Toplu Z {i}", weeks=60 + i) for i in range(3)]
+    services.bulk_apply(U, MGR, ids, "onayla")
+    assert services.bulk_apply(U, PLAN, ids, "teslim", tarih=date.today(), alan="Ayşe")["ok"] == []  # önce çıktı gerekir
+    assert services.bulk_apply(U, PLAN, ids, "cikti")["ok"] == ids
+    with pytest.raises(ValueError, match="zorunlu"):
+        services.bulk_apply(U, PLAN, ids, "teslim", tarih=date.today(), alan="")
+    assert services.bulk_apply(U, PLAN, ids, "teslim", tarih=date.today(), alan="Ayşe")["ok"] == ids
+    assert services.bulk_apply(U, PLAN, ids, "sap", tarih=date.today())["ok"] == ids
+    assert all(services.stage(services.get_request(i)) == "Tamamlandı" for i in ids)
+    assert services.bulk_apply(U, PLAN, ids, "sap", tarih=date.today())["ok"] == []  # tekrar uygulanmaz
+    assert audit.verify_consistency(services.load_requests(include_deleted=True)) == []
