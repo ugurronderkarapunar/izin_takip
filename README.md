@@ -37,6 +37,9 @@ data/             ilk çalıştırmada oluşur (talepler, log, personel, tatille
 Talep (Beklemede) → Karar (Onaylandı / Reddedildi / İptal) → Çıktı alındı → İK'ya teslim → SAP girişi.
 Her adım kim/ne zaman ile loglanır. Teslim yanlış girildiyse **gerekçeli düzeltme / geri alma** vardır; eski kayıt `teslim_gecmisi` ve logda kalır.
 
+### Toplu işlem
+*Talepler* sayfasında birden fazla satırı seçince (ya da personel filtresiyle birkaç kişiyi seçip paneldeki **Filtredeki tüm talepler** kapsamını kullanınca) **⚡ Toplu işlem** paneli açılır: Onayla, Reddet, İptal et, Çıktı alındı, İK'ya teslim edildi, SAP'ye girildi. Panel işleme uygun olanları ve atlanacakları gösterir; uygulamadan önce özet liste ve onay kutusu çıkar. Reddet/iptal gerekçe, teslim tarih + teslim alan ister. Her talep ayrı işlemdir (biri hata verirse diğerleri uygulanır, hatalar raporlanır); her talep için normal log kaydı ve ayrıca özet bir "Toplu İşlem" kaydı düşer. *Yapılacaklar* sayfasındaki her kuyrukta da "tümü" düğmesi vardır. Onay işlemleri **Yönetici / Admin** rolünde görünür; çıktı, teslim ve SAP **Planlama / Admin** rolündedir.
+
 ### Düzenleme
 - **İzin hakkı (Yönetim > Personel):** Personel seçilir, yıl seçilir, hak ve devreden gün düzenlenip **Kaydet**'e basılır. Değişiklik yalnızca seçili yılı etkiler (geçmiş yıl bakiyeleri bozulmaz), loga "önceki → yeni" olarak işlenir. Ad soyad, ekip, telefon ve aktiflik de aynı formdan düzenlenir; ad değişince o personelin tüm taleplerindeki isim de güncellenir.
 - **Talep düzenleme (✏️ Düzenle):** Tür, tarih ve açıklama düzenlenir; çakışma, bakiye ve ekip yoğunluğu kontrolleri yeniden yapılır. Onaylı talepte gerekçe zorunludur ve tür/tarih değişirse talep yeniden onaya düşer. Çıktısı alınmış, teslim edilmiş, SAP'ye girilmiş veya kapanmış talepler düzenlenemez (iptal edip yeni talep açılır).
@@ -46,6 +49,7 @@ Talep detayındaki **🗑️ Sil** gerekçe ister (Planlama ve Admin). Silinen t
 
 ## Kararlılık
 
+- **Kurulum doğrulaması:** Her dosyanın son satırı `# END-OF-FILE v2.3` işaretidir. Açılışta `app.py` bunları kontrol eder; eksik, kesilmiş veya eski sürüm bir dosya varsa hangi dosya olduğunu söyleyip durur (ör. dosyaları GitHub'a yapıştırırken uzun dosya kesilirse).
 - **İşlem bütünlüğü (rollback):** Her yazma işlemi tüm veri dosyalarını kapsayan bir işlemdir; ortasında hata olursa (ör. log yazılamadı) talep, log, sayaç ve diğer dosyalar eski haline döner.
 - **Genel hata yakalama:** Beklenmeyen hatada ham hata ekranı yerine hata kodlu mesaj gösterilir, ayrıntı `data/app.log`'a yazılır. Dosya kilidi meşgulse anlaşılır uyarı verilir.
 - **Açılışta bütünlük kontrolü:** Log zinciri ve talep-log tutarlılığı kontrol edilir; sorun varsa her sayfada kırmızı uyarı çıkar.
