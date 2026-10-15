@@ -62,3 +62,5 @@ with st.expander("🔏 Mühür (zincirin dışarıda saklanabilir özeti)"):
     if seal.strip():
         ok, msg = audit.check_seal(seal, logs)
         (st.success if ok else st.error)(msg)
+
+# END-OF-FILE v2.3

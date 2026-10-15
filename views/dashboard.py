@@ -54,6 +54,10 @@ def queue_list(items: list[dict], kind: str) -> None:
     if not items:
         st.success("Bu kuyrukta bekleyen iş yok.")
         return
+    bulk = {"onay": "onayla", "cikti": "cikti", "teslim": "teslim", "sap": "sap"}[kind]
+    if len(items) > 1 and ui.can(config.BULK_ACTIONS[bulk][1]):
+        if st.button(f"{config.BULK_ACTIONS[bulk][0]} — kuyruktaki tümü ({len(items)})", key=f"q_{kind}_bulk"):
+            ui.dialog_bulk(bulk, [r["id"] for r in items])
     for r in items[:15]:
         c = st.columns([5, 1, 2])
         c[0].markdown(f"**{r['id']}** · {r['personel_adi']} · {fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} · {r['is_gunu']} iş günü")
@@ -98,3 +102,5 @@ if rows:
                  column_config={"Tarih": st.column_config.DateColumn(format="DD.MM.YYYY")})
 else:
     st.caption("Önümüzdeki 14 günde izinli kişi yok.")
+
+# END-OF-FILE v2.3

@@ -1,4 +1,4 @@
-"""Talep listesi: filtre, kayıtlı filtreler, sayfalama, satır seçerek detay ve işlem."""
+"""Talep listesi: filtre, personel çoklu seçimi, çoklu satır seçimi + toplu işlem, sayfalama, detay paneli."""
 import math
 
 import streamlit as st
@@ -17,25 +17,30 @@ if df_all.empty:
     st.info("Henüz kayıtlı talep yok.")
     st.stop()
 
+all_people = sorted(df_all["personel_adi"].unique())
+st.session_state["f_pers"] = [p for p in st.session_state.get("f_pers", []) if p in all_people]
+
 
 def _apply_saved() -> None:
     f = saved.get(st.session_state.get("f_kayitli") or "", {})
-    st.session_state.update(f_durum=f.get("durum", []), f_tur=f.get("tur", []),
-                            f_asama=f.get("asama", []), f_ara=f.get("ara", ""))
+    st.session_state.update(f_durum=f.get("durum", []), f_tur=f.get("tur", []), f_asama=f.get("asama", []),
+                            f_ara=f.get("ara", ""), f_pers=[p for p in f.get("pers", []) if p in all_people])
 
 
 # --- Filtreler ----------------------------------------------------------------
 with st.expander("🔎 Filtreler", expanded=True):
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3 = st.columns(3)
     durum_f = f1.multiselect("Durum", config.ALL_STATUSES, key="f_durum")
     tur_f = f2.multiselect("İzin türü", config.LEAVE_TYPES, key="f_tur")
     asama_f = f3.multiselect("Aşama", config.STAGES, key="f_asama")
-    ara = f4.text_input("Personel / ID ara", key="f_ara")
+    g1, g2 = st.columns(2)
+    pers_f = g1.multiselect("Personel (çoklu seçim)", all_people, key="f_pers", placeholder="Tüm personel")
+    ara = g2.text_input("Personel / ID ara", key="f_ara")
     s1, s2, s3 = st.columns([2, 2, 1])
     s1.selectbox("Kayıtlı filtre", list(saved), index=None, placeholder="Seçin…", key="f_kayitli", on_change=_apply_saved)
-    yeni_ad = s2.text_input("Bu filtreyi kaydet", placeholder="Örn: Teslim bekleyenler", key="f_yeni_ad")
+    yeni_ad = s2.text_input("Bu filtreyi kaydet", placeholder="Örn: Onay bekleyen — Makine ekibi", key="f_yeni_ad")
     if s3.button("Kaydet", key="f_kaydet", width="stretch") and yeni_ad.strip():
-        services.save_filter(yeni_ad, {"durum": durum_f, "tur": tur_f, "asama": asama_f, "ara": ara})
+        services.save_filter(yeni_ad, {"durum": durum_f, "tur": tur_f, "asama": asama_f, "ara": ara, "pers": pers_f})
         ui.flash(f"Filtre kaydedildi: {yeni_ad.strip()}")
         st.rerun()
 
@@ -46,6 +51,8 @@ if tur_f:
     df = df[df["izin_turu"].isin(tur_f)]
 if asama_f:
     df = df[df["asama"].isin(asama_f)]
+if pers_f:
+    df = df[df["personel_adi"].isin(pers_f)]
 if ara.strip():
     df = df[df["personel_adi"].str.contains(ara.strip(), case=False, na=False) | df["id"].str.contains(ara.strip(), case=False, na=False)]
 df = df.sort_values("olusturma_zamani", ascending=False).reset_index(drop=True)
@@ -56,18 +63,22 @@ size = p1.selectbox("Sayfa boyutu", [10, 25, 50, 100], key="sayfa_boyut")
 pages = max(1, math.ceil(len(df) / size))
 st.session_state["sayfa_no"] = min(st.session_state.get("sayfa_no", 1), pages)
 page = p2.number_input("Sayfa", min_value=1, max_value=pages, step=1, key="sayfa_no")
-p3.caption(f"{len(df)} kayıt · sayfa {page}/{pages}. Detay için satıra tıklayın (tekrar tıklayınca kapanır).")
+p3.caption(f"{len(df)} kayıt · sayfa {page}/{pages}. Tek satır seçince detay açılır; **birden fazla satır** seçince toplu işlem paneli açılır. "
+           "Seçim yalnızca görünen sayfa içindir; tüm filtreye uygulamak için panelde 'Filtredeki tüm talepler'i seçin.")
 view = df.iloc[(page - 1) * size: page * size].copy()
 view["Durum"] = view.apply(lambda r: ui.status_label(r["durum"], r["silindi"]), axis=1)
-view["Aşamalar"] = view.apply(lambda r: f"{'✅' if r['cikti_alindi'] else '⬜'} Çıktı · {'✅' if r['ik_teslim'] else '⬜'} Teslim · {'✅' if r['sap_girildi'] else '⬜'} SAP"
-                              if r["durum"] == config.S_APPROVED and not r["silindi"] else "—", axis=1)
+view["Aşamalar"] = view.apply(
+    lambda r: f"{'✅' if r['cikti_alindi'] else '⬜'} Çıktı · {'✅' if r['ik_teslim'] else '⬜'} Teslim · {'✅' if r['sap_girildi'] else '⬜'} SAP"
+    if r["durum"] == config.S_APPROVED and not r["silindi"] else "—", axis=1)
 
+bulk_slot = st.container()  # toplu işlem paneli, tablo seçimi bilindikten sonra doldurulur
 selected = st.session_state.get("secili_talep")
 left, right = st.columns([5, 4]) if selected else (st.container(), None)
 with left:
     event = st.dataframe(
         view[["id", "personel_adi", "izin_turu", "baslangic", "bitis", "is_gunu", "Durum", "Aşamalar", "ek_sayisi"]],
-        hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key=f"liste_tablo_{st.session_state.get('tablo_nonce', 0)}",
+        hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
+        key=f"liste_tablo_{st.session_state.get('tablo_nonce', 0)}",
         column_config={
             "id": "Talep ID", "personel_adi": "Personel", "izin_turu": "Tür",
             "baslangic": st.column_config.DateColumn("Başlangıç", format="DD.MM.YYYY"),
@@ -76,11 +87,10 @@ with left:
             "ek_sayisi": st.column_config.NumberColumn("Ek", format="%d"),
         },
     )
-    rows = event.selection.rows
-    sel_id = view.iloc[rows[0]]["id"] if rows else None
-    if sel_id != st.session_state.get("_son_secim"):
-        st.session_state["_son_secim"] = sel_id
-        st.session_state["secili_talep"] = sel_id
+    sel_ids = tuple(view.iloc[i]["id"] for i in event.selection.rows if i < len(view))
+    if sel_ids != st.session_state.get("_son_secim", ()):
+        st.session_state["_son_secim"] = sel_ids
+        st.session_state["secili_talep"] = sel_ids[0] if len(sel_ids) == 1 else None
         st.rerun()
 
     export = df.copy()
@@ -91,7 +101,12 @@ with left:
     d2.download_button("⬇️ Excel", services.df_to_excel({"Talepler": export}), "talepler.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
 
+with bulk_slot:
+    ui.render_bulk_panel(list(sel_ids), list(df["id"]))
+
 if right is not None:
     with right:
         with st.container(border=True):
             ui.render_detail(selected, "ls")
+
+# END-OF-FILE v2.3

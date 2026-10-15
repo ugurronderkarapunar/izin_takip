@@ -60,3 +60,5 @@ if not over.empty:
 month_hol = [h for h in calendar_utils.holidays_store.read() if first.isoformat() <= h["tarih"] <= last.isoformat()]
 if month_hol:
     st.caption("Resmî tatiller: " + " · ".join(f"{h['tarih'][8:]}.{h['tarih'][5:7]} {h['ad']}" for h in month_hol))
+
+# END-OF-FILE v2.3

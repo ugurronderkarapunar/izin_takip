@@ -86,3 +86,5 @@ with tab_excel:
                         st.success(f"{len(created)} talep oluşturuldu.")
                         if errors:
                             st.error("Atlanan satırlar:\n\n" + "\n".join(f"- {e}" for e in errors))
+
+# END-OF-FILE v2.3

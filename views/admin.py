@@ -160,3 +160,5 @@ with t_sec:
         st.error(p)
     if not rep["chain"] and not rep["consistency"]:
         st.success("Bütünlük kontrolleri temiz.")
+
+# END-OF-FILE v2.3

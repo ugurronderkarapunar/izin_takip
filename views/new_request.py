@@ -58,3 +58,5 @@ if st.button("Talebi kaydet", type="primary", disabled=blocked):
             ui.flash(f"Talep oluşturuldu: {tid} ({config.S_PENDING})")
             st.session_state["yt_nonce"] = nonce + 1
             st.rerun()
+
+# END-OF-FILE v2.3
