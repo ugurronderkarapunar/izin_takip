@@ -25,8 +25,8 @@ def _mk(name: str, tur="Mazeret İzni", weeks=0, days=1, **kw) -> str:
 
 
 def test_work_days_skips_weekend_and_holiday():
-    # 2026-10-29 Perşembe Cumhuriyet Bayramı; 26-30 Ekim -> 4 iş günü
-    assert calendar_utils.work_days(date(2026, 10, 26), date(2026, 10, 30)) == 4
+    # 28 Ekim arife (yarım gün), 29 Ekim Cumhuriyet Bayramı: 26-30 Ekim -> 1 + 1 + 0.5 + 0 + 1
+    assert calendar_utils.work_days(date(2026, 10, 26), date(2026, 10, 30)) == 3.5
     assert calendar_utils.work_days(date(2026, 10, 24), date(2026, 10, 25)) == 0
 
 
@@ -103,16 +103,17 @@ def test_attachment_roundtrip_and_validation():
 
 
 def test_chain_ok_then_tamper_detected():
+    from core.storage import get_backend
     assert audit.verify_chain() == []
-    assert audit.verify_consistency(services.load_requests()) == []
-    original = config.AUDIT_LOG.read_text(encoding="utf-8")
-    logs = json.loads(original)
-    logs[0]["detay"] = "oynandı"
-    config.AUDIT_LOG.write_text(json.dumps(logs, ensure_ascii=False), encoding="utf-8")
+    assert audit.verify_consistency(services.load_requests(include_deleted=True)) == []
+    original = audit.logs_store.read()
+    tampered = [dict(e) for e in original]
+    tampered[0]["detay"] = "oynandı"
+    get_backend().audit_replace_all(tampered)
     try:
         assert audit.verify_chain()  # değişiklik yakalanmalı
     finally:
-        config.AUDIT_LOG.write_text(original, encoding="utf-8")
+        get_backend().audit_replace_all(original)
     assert audit.verify_chain() == []
 
 
@@ -175,7 +176,7 @@ def test_documents_and_backup():
     assert documents.build_docx(r, {})[:2] == b"PK"
     if documents.pdf_available():
         assert documents.build_pdf(r, {})[:4] == b"%PDF"
-    assert backup.backup_now("test").exists()
+    assert backup.backup_now("test") in backup.list_backups()
     assert backup.zip_bytes()[:2] == b"PK"
 
 
@@ -243,7 +244,7 @@ def test_rollback_restores_id_counter(monkeypatch):
 
 def test_backup_restore_roundtrip():
     tid_before = _mk("Yedek Test A", weeks=23)
-    name = backup.backup_now("rt").name
+    name = backup.backup_now("rt")
     tid_after = _mk("Yedek Test B", weeks=24)
     assert services.get_request(tid_after)
     services.restore_backup(U, ADMIN, name)
