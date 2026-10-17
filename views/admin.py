@@ -1,48 +1,55 @@
-"""Yönetim: personel, ayarlar, tatiller, yedek, güvenlik."""
-from datetime import date
+"""Yönetim: personel ve izin hakkı, ayarlar, tatiller, yedek, güvenlik, sistem durumu."""
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
-from core import audit, backup, calendar_utils, services
+from core import audit, backup, calendar_utils, config, notifier, services, storage
 from ui import components as ui
 
 st.title("⚙️ Yönetim")
 if not ui.can("admin"):
-    st.warning("Bu sayfa yalnızca 'Admin' rolü içindir.")
+    st.warning("Bu sayfa için yetkiniz yok.")
     st.stop()
 
-t_per, t_set, t_hol, t_bak, t_sec = st.tabs(["👥 Personel", "🎛️ Ayarlar", "🎌 Tatiller", "💾 Yedek", "🔐 Güvenlik"])
+t_per, t_set, t_hol, t_bak, t_sec, t_sys = st.tabs(["👥 Personel", "🎛️ Ayarlar", "🎌 Tatiller", "💾 Yedek", "🔐 Güvenlik", "🩺 Sistem durumu"])
 
+# ------------------------------------------------------------------ Personel
 with t_per:
     people = services.list_personnel()
     yil = st.selectbox("Yıl", list(range(date.today().year - 1, date.today().year + 3)), index=1, key="pe_year",
                        help="Tablo ve izin hakkı düzenleme bu yıl için geçerlidir.")
     if people:
-        bt = services.balance_table(yil)
-        st.dataframe(bt, hide_index=True, width="stretch", column_config={"Aktif": st.column_config.CheckboxColumn("Aktif")})
-
+        st.dataframe(services.balance_table(yil), hide_index=True, width="stretch",
+                     column_config={"Aktif": st.column_config.CheckboxColumn("Aktif")})
         st.markdown("**Personeli düzenle**")
         if "_pe_next" in st.session_state:  # yeniden adlandırma sonrası seçimi yeni ada taşı
             st.session_state["pe_person"] = st.session_state.pop("_pe_next")
-        names = [p["ad"] for p in people]
-        sel = st.selectbox("Personel", names, key="pe_person")
+        sel = st.selectbox("Personel", [p["ad"] for p in people], key="pe_person")
         p = services.get_person(sel)
         b = services.balance_for(sel, yil)
+        _, kaynak = services.entitlement(p, yil)
         kb = lambda n: f"pe_{sel}_{yil}_{n}"  # noqa: E731  (kişi/yıl değişince alanlar yeniden doldurulur)
         with st.form("pe_form"):
             c1, c2, c3 = st.columns(3)
             yeni_ad = c1.text_input("Ad soyad", sel, key=kb("ad"))
             ekip = c2.text_input("Ekip", p.get("ekip", ""), key=kb("ekip"))
             tel = c3.text_input("Telefon", p.get("telefon", ""), key=kb("tel"))
-            h1, h2, h3 = st.columns(3)
-            hak = h1.number_input(f"{yil} yıllık izin hakkı (gün)", 0.0, 366.0, float(b["hak"]), step=0.5, format="%.1f", key=kb("hak"))
-            dev = h2.number_input(f"{yil} devreden (gün)", 0.0, 366.0, float(b["devreden"]), step=0.5, format="%.1f", key=kb("dev"))
-            aktif = h3.checkbox("Aktif personel", p.get("aktif", True), key=kb("aktif"))
+            g1, g2, g3, g4 = st.columns(4)
+            giris = g1.date_input("İşe giriş tarihi", value=date.fromisoformat(p["ise_giris"]) if p.get("ise_giris") else None,
+                                  min_value=date(1960, 1, 1), max_value=date.today(), format="DD.MM.YYYY", key=kb("giris"),
+                                  help="Girilirse yıllık izin hakkı kıdeme göre otomatik hesaplanır (Ayarlar > İzin hakkı).")
+            hak = g2.number_input(f"{yil} yıllık izin hakkı (gün)", 0.0, 366.0, float(b["hak"]), step=0.5, format="%.1f", key=kb("hak"))
+            dev = g3.number_input(f"{yil} devreden (gün)", 0.0, 366.0, float(b["devreden"]), step=0.5, format="%.1f", key=kb("dev"))
+            aktif = g4.checkbox("Aktif personel", p.get("aktif", True), key=kb("aktif"))
             gerekce = st.text_input("Not / gerekçe (isteğe bağlı)", key=kb("not"))
             kaydet = st.form_submit_button("💾 Kaydet", type="primary")
-        st.caption(f"{yil} için şu an: hak {b['hak']:g} · devreden {b['devreden']:g} · kullanılan {b['kullanilan']:g} · "
+        st.caption(f"{yil} için şu an: hak {b['hak']:g} ({kaynak}) · devreden {b['devreden']:g} · kullanılan {b['kullanilan']:g} · "
                    f"kalan {b['kalan']:g}. Hak ve devreden değişikliği **yalnızca {yil} yılını** etkiler. Personel silinmez; ayrılanlar pasife alınır.")
+        if str(yil) in p["hak_yillik"] or str(yil) in p["devreden_yillik"]:
+            if st.button(f"↺ {yil} için elle girilen değeri kaldır (otomatik hesaba dön)", key=f"pe_clear_{sel}_{yil}"):
+                if ui.run(services.clear_year_entitlement, sel, yil, ok_msg=f"{sel}: {yil} değeri otomatik hesaba döndü"):
+                    st.rerun()
         if kaydet:
             msgs: list[str] = []
             ok = True
@@ -57,6 +64,8 @@ with t_per:
                 profile["telefon"] = tel.strip()
             if aktif != p.get("aktif", True):
                 profile["aktif"] = aktif
+            if (giris.isoformat() if giris else None) != p.get("ise_giris"):
+                profile["ise_giris"] = giris.isoformat() if giris else None
             if ok and profile:
                 ok = ui.run(services.update_personnel, sel, not_=gerekce, ok_msg="", **profile)
                 if ok:
@@ -82,53 +91,87 @@ with t_per:
         if st.form_submit_button("Ekle") and ui.run(services.add_personnel, ad, hak, dev, tel, ekip, ok_msg=f"{ad} eklendi"):
             st.rerun()
 
+# ------------------------------------------------------------------ Ayarlar
 with t_set:
     s = services.get_settings()
     with st.form("ayarlar"):
+        st.markdown("**Kullanıcılar** (veri girişi yapacak kişiler; yapılan her işlem bu adla loglanır)")
+        users_txt = st.text_area("Her satıra bir ad", "\n".join(s["kullanicilar"]), height=90,
+                                 help="Doluysa giriş ekranında bu listeden seçilir; boşsa ad serbest yazılır.")
         st.markdown("**Süreç eşikleri**")
         a1, a2, a3, a4 = st.columns(4)
-        hak = a1.number_input("Varsayılan yıllık hak", 0, 60, int(s["yillik_hak_varsayilan"]))
+        hak_v = a1.number_input("Varsayılan yıllık hak", 0.0, 366.0, float(s["yillik_hak_varsayilan"]), step=1.0)
         esik = a2.number_input("Aynı gün izinli eşiği", 1, 100, int(s["esik_ayni_anda"]))
-        yedek = a3.number_input("Yedek saklama (gün)", 1, 365, int(s["yedek_saklama_gun"]))
+        gsaat = a3.number_input("Günlük çalışma saati", 1.0, 24.0, float(s["gunluk_calisma_saati"]), step=0.5,
+                                help="Saatlik izni güne çevirmek için (ör. 2 saat = 2/8 gün).")
+        yedek = a4.number_input("Yedek saklama (gün)", 1, 3650, int(s["yedek_saklama_gun"]))
         b1, b2, b3, b4 = st.columns(4)
-        u1 = b1.number_input("Onay bekleme uyarısı (gün)", 0, 30, int(s["uyari_bekleyen_gun"]))
-        u2 = b2.number_input("Çıktı alınmama uyarısı (gün)", 0, 30, int(s["uyari_cikti_gun"]))
-        u3 = b3.number_input("Teslim edilmeme uyarısı (gün)", 0, 30, int(s["uyari_teslim_gun"]))
-        u4 = b4.number_input("SAP girişi uyarısı (gün)", 0, 30, int(s["uyari_sap_gun"]))
-        st.markdown("**Bildirim kişileri** (uyarılardaki WhatsApp / e-posta bağlantıları için)")
+        u1 = b1.number_input("Onay bekleme uyarısı (gün)", 0, 60, int(s["uyari_bekleyen_gun"]))
+        u2 = b2.number_input("Çıktı alınmama uyarısı (gün)", 0, 60, int(s["uyari_cikti_gun"]))
+        u3 = b3.number_input("Teslim edilmeme uyarısı (gün)", 0, 60, int(s["uyari_teslim_gun"]))
+        u4 = b4.number_input("SAP girişi uyarısı (gün)", 0, 60, int(s["uyari_sap_gun"]))
+        st.markdown("**İzin hakkı (kıdem)** — varsayılan değerler 4857 sayılı İş Kanunu m.53 asgari süreleridir; "
+                    "kurumunuzun toplu sözleşmesi farklıysa değiştirin.")
+        otomatik = st.toggle("İşe giriş tarihi girilmiş personelin hakkını kıdemden otomatik hesapla", value=bool(s["otomatik_hak"]))
+        kd = list(s["kidem_tablosu"]) + [{"min_yil": 0, "hak": 0}] * 3
+        k_cols = st.columns(3)
+        kidem = []
+        for i, col in enumerate(k_cols):
+            my = col.number_input(f"{i + 1}. kademe: en az (yıl)", 0, 60, int(kd[i]["min_yil"]), key=f"kd_y{i}")
+            kh = col.number_input(f"{i + 1}. kademe: hak (gün)", 0.0, 366.0, float(kd[i]["hak"]), step=1.0, key=f"kd_h{i}")
+            kidem.append({"min_yil": my, "hak": kh})
+        st.markdown("**Bildirim kişileri** (uyarılardaki WhatsApp / e-posta bağlantıları ve otomatik e-posta için)")
         c1, c2, c3, c4 = st.columns(4)
         yt = c1.text_input("Yönetici telefon", s["yonetici_telefon"])
         ye = c2.text_input("Yönetici e-posta", s["yonetici_eposta"])
         it = c3.text_input("İK telefon", s["ik_telefon"])
         ie = c4.text_input("İK e-posta", s["ik_eposta"])
+        d1, d2 = st.columns(2)
+        pe = d1.text_input("Planlama e-posta", s["planlama_eposta"])
+        oz = d2.text_input("Özet alıcıları (virgülle ayırın)", s["ozet_alicilari"], help="Tüm uyarıların ve sistem sorunlarının özetini alır.")
+        st.markdown("**Otomatik e-posta bildirimi ve belge doğrulama**")
+        e1, e2, e3 = st.columns([1, 1, 3])
+        b_aktif = e1.toggle("Günlük e-posta özeti", value=bool(s["bildirim_aktif"]))
+        b_saat = e2.text_input("Saat (SS:DD)", s["bildirim_saat"])
+        url = e3.text_input("Uygulama adresi", s["uygulama_url"], placeholder="https://izin-takip.streamlit.app",
+                            help="İzin kağıdındaki QR kod bu adrese götürür. Boşsa QR kod basılmaz.")
         if st.form_submit_button("Ayarları kaydet", type="primary"):
-            new = {"yillik_hak_varsayilan": hak, "esik_ayni_anda": esik, "yedek_saklama_gun": yedek,
+            new = {"kullanicilar": [u.strip() for u in users_txt.splitlines() if u.strip()], "yillik_hak_varsayilan": hak_v,
+                   "esik_ayni_anda": esik, "gunluk_calisma_saati": gsaat, "yedek_saklama_gun": yedek,
                    "uyari_bekleyen_gun": u1, "uyari_cikti_gun": u2, "uyari_teslim_gun": u3, "uyari_sap_gun": u4,
-                   "yonetici_telefon": yt, "yonetici_eposta": ye, "ik_telefon": it, "ik_eposta": ie}
+                   "otomatik_hak": otomatik, "kidem_tablosu": kidem,
+                   "yonetici_telefon": yt, "yonetici_eposta": ye, "ik_telefon": it, "ik_eposta": ie,
+                   "planlama_eposta": pe, "ozet_alicilari": oz, "bildirim_aktif": b_aktif, "bildirim_saat": b_saat,
+                   "uygulama_url": url.strip()}
             if ui.run(services.save_settings, new, ok_msg="Ayarlar kaydedildi"):
                 st.rerun()
 
+# ------------------------------------------------------------------ Tatiller
 with t_hol:
-    st.caption("Dinî bayram tarihleri her yıl değişir; ilgili yılın Diyanet takvimiyle kontrol edip güncelleyin.")
-    hol = calendar_utils.holidays_store.read()
-    st.dataframe(pd.DataFrame(hol).rename(columns={"tarih": "Tarih", "ad": "Tatil"}), hide_index=True, width="stretch", height=260)
+    st.caption("Dinî bayram tarihleri her yıl değişir; ilgili yılın Diyanet takvimiyle kontrol edip güncelleyin. "
+               "Arife günleri **yarım gün** olarak işaretlenir (izin hesabında 0,5 iş günü).")
+    hol = calendar_utils.load_holidays()
+    st.dataframe(pd.DataFrame(hol).rename(columns={"tarih": "Tarih", "ad": "Tatil", "yarim": "Yarım gün"}), hide_index=True, width="stretch", height=260)
     with st.form("hol_add"):
-        h1, h2 = st.columns(2)
+        h1, h2, h3 = st.columns([2, 3, 1])
         hd = h1.date_input("Tarih", value=date.today(), format="DD.MM.YYYY")
         hn = h2.text_input("Tatil adı")
-        if st.form_submit_button("Tatil ekle") and ui.run(services.add_holiday, hd, hn, ok_msg="Tatil eklendi"):
+        hy = h3.checkbox("Yarım gün")
+        if st.form_submit_button("Tatil ekle") and ui.run(services.add_holiday, hd, hn, hy, ok_msg="Tatil eklendi"):
             st.rerun()
     rm = st.selectbox("Tatil kaldır", [h["tarih"] + " · " + h["ad"] for h in hol], index=None, placeholder="Seçin…")
     if rm and st.button("Seçili tatili kaldır"):
         if ui.run(services.remove_holiday, rm.split(" · ")[0], ok_msg="Tatil kaldırıldı"):
             st.rerun()
 
+# ------------------------------------------------------------------ Yedek
 with t_bak:
-    st.caption("Her gün ilk açılışta otomatik yedek alınır. Yedekler data/backups klasöründedir.")
+    be = storage.get_backend()
+    st.caption("Her gün ilk açılışta otomatik yedek alınır. " + ("Yedekler veritabanında saklanır (uygulama yeniden başlasa da kaybolmaz)."
+               if be.kind == "veritabanı" else "Yedekler data/backups klasöründedir."))
     b1, b2 = st.columns(2)
     if b1.button("Şimdi yedek al", width="stretch"):
-        d = backup.backup_now("manuel")
-        st.success(f"Yedek alındı: {d.name}")
+        st.success(f"Yedek alındı: {backup.backup_now('manuel')}")
     b2.download_button("⬇️ Tüm veriyi ZIP indir (ekler dahil)", backup.zip_bytes(), f"izin_takip_yedek_{date.today().isoformat()}.zip",
                        "application/zip", width="stretch")
     st.write(f"Mevcut yedekler ({len(backup.list_backups())}):")
@@ -143,12 +186,13 @@ with t_bak:
         if ui.run(services.restore_backup, pick, ok_msg=f"{pick} yedeğine dönüldü"):
             st.rerun()
 
+# ------------------------------------------------------------------ Güvenlik
 with t_sec:
     rep = services.integrity_report()
     st.write(f"Doğrulama anahtarı kaynağı: **{rep['key_source']}**")
-    st.caption("Anahtar, log zincirini HMAC ile imzalar. Anahtarı bilmeyen biri zinciri baştan yazarsa bile doğrulama başarısız olur. "
-               "En güvenlisi anahtarı IZIN_AUDIT_KEY ortam değişkeniyle vermek ve ayrıca saklamaktır; "
-               "anahtar kaybolursa eski HMAC kayıtları doğrulanamaz. data/.audit_key yedeklere konmaz.")
+    st.caption("Anahtar, log zincirini HMAC ile imzalar ve izin formundaki QR doğrulamasında kullanılır. Anahtarı bilmeyen biri zinciri baştan "
+               "yazsa bile doğrulama başarısız olur. En güvenlisi anahtarı Streamlit secrets'ta `audit_key` olarak vermek ve ayrıca saklamaktır; "
+               "anahtar kaybolursa eski kayıtlar doğrulanamaz.")
     if st.button("Şimdi çapa (anchor) al"):
         try:
             a = audit.anchor_now()
@@ -156,9 +200,62 @@ with t_sec:
         except ValueError as exc:
             st.error(str(exc))
     st.write(f"Toplam çapa: {rep['anchor_count']} · Log: {rep['log_count']}")
-    for p in rep["chain"] + rep["consistency"]:
-        st.error(p)
+    for p_ in rep["chain"] + rep["consistency"]:
+        st.error(p_)
     if not rep["chain"] and not rep["consistency"]:
         st.success("Bütünlük kontrolleri temiz.")
 
-# END-OF-FILE v2.3
+# ------------------------------------------------------------------ Sistem durumu (gözlem)
+with t_sys:
+    be = storage.get_backend()
+    try:
+        ping, ping_ok = be.ping(), True
+    except Exception as exc:  # bağlantı sorunu burada görünür olmalı
+        ping, ping_ok = f"HATA: {exc}", False
+    rep = services.integrity_report()
+    reqs = services.load_requests(include_deleted=True)
+    m = st.columns(5)
+    m[0].metric("Depolama", be.kind)
+    m[1].metric("Bağlantı", "Tamam" if ping_ok else "SORUN")
+    m[2].metric("Sürüm", config.APP_VERSION)
+    m[3].metric("Talep (silinen)", f"{len([r for r in reqs if not r['silindi']])} ({len([r for r in reqs if r['silindi']])})")
+    m[4].metric("Log / çapa", f"{rep['log_count']} / {rep['anchor_count']}")
+    st.caption(f"{be.info()} · {ping}")
+    if be.kind == "dosya":
+        st.warning("Dosya depolaması kullanılıyor. Streamlit Community Cloud gibi geçici disklerde yeniden başlatmada veri kaybolur; "
+                   "kalıcılık için veritabanı bağlantısı (secrets: database_url) tanımlayın.")
+    hist = notifier.hist_store.read()
+    cfg_ok = notifier.smtp_config() is not None
+    n1, n2, n3 = st.columns(3)
+    n1.metric("SMTP ayarı", "Var" if cfg_ok else "Yok")
+    n2.metric("Günlük e-posta", "Açık" if services.get_settings()["bildirim_aktif"] else "Kapalı")
+    n3.metric("Son başarılı gönderim", hist.get("son_basarili", "—"))
+    to = st.text_input("Test e-postası adresi", key="sys_test_to")
+    t1, t2, t3 = st.columns(3)
+    if t1.button("Test e-postası gönder", disabled=not to.strip(), width="stretch"):
+        res = notifier.send_test(to.strip())
+        (st.success if res["durum"] == "gönderildi" else st.error)(f"Test e-postası: {res['durum']} {res.get('hata', '')}")
+    if t2.button("Özeti önizle", width="stretch"):
+        res = notifier.run_daily(force=True, dry_run=True)
+        st.write(f"{res.get('uyari_sayisi', 0)} uyarı, {len(res.get('mesajlar', []))} e-posta üretilecek.")
+        for mm in res.get("mesajlar", []):
+            with st.expander(f"{mm['to']} — {mm['subject']}"):
+                st.text(mm["text"])
+    if t3.button("Özeti şimdi gönder", width="stretch"):
+        res = notifier.run_daily(force=True)
+        (st.success if res["durum"] == "gönderildi" else st.warning)(f"Sonuç: {res['durum']} {res.get('hata', '')}")
+    st.markdown("**Son 30 günde işlem sayısı**")
+    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    per_day = pd.Series([e["zaman"][:10] for e in audit.logs_store.read() if e["zaman"][:10] >= cutoff]).value_counts().sort_index()
+    if len(per_day):
+        st.bar_chart(per_day)
+    else:
+        st.caption("Son 30 günde işlem yok.")
+    st.markdown("**Son olaylar (hata / uyarı)**")
+    ev = storage.recent_events(50)
+    if ev:
+        st.dataframe(pd.DataFrame(ev), hide_index=True, width="stretch")
+    else:
+        st.caption("Kayıtlı olay yok.")
+
+# END-OF-FILE v3.0

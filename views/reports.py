@@ -32,7 +32,7 @@ with tab_rapor:
 
         m = st.columns(5)
         m[0].metric("Talep sayısı", len(yr))
-        m[1].metric("Onaylı izin (iş günü)", int(onayli["is_gunu"].sum()))
+        m[1].metric("Onaylı izin (iş günü)", f"{onayli['is_gunu'].sum():g}")
         m[2].metric("Ort. onay süresi", _fmt(onay_sure.mean()) if len(onay_sure) else "—")
         m[3].metric("Onay → İK teslim", f"{teslim_sure.dt.days.mean():.1f} gün" if len(teslim_sure) else "—")
         m[4].metric("Süreci tamamlanan", f"{tamam}/{len(onayli)}" if len(onayli) else "—")
@@ -87,4 +87,4 @@ with tab_excel:
                         if errors:
                             st.error("Atlanan satırlar:\n\n" + "\n".join(f"- {e}" for e in errors))
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

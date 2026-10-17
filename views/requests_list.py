@@ -1,6 +1,7 @@
 """Talep listesi: filtre, personel çoklu seçimi, çoklu satır seçimi + toplu işlem, sayfalama, detay paneli."""
 import math
 
+import pandas as pd
 import streamlit as st
 
 from core import config, services
@@ -33,9 +34,11 @@ with st.expander("🔎 Filtreler", expanded=True):
     durum_f = f1.multiselect("Durum", config.ALL_STATUSES, key="f_durum")
     tur_f = f2.multiselect("İzin türü", config.LEAVE_TYPES, key="f_tur")
     asama_f = f3.multiselect("Aşama", config.STAGES, key="f_asama")
-    g1, g2 = st.columns(2)
+    g1, g2, g3 = st.columns([2, 2, 1])
     pers_f = g1.multiselect("Personel (çoklu seçim)", all_people, key="f_pers", placeholder="Tüm personel")
     ara = g2.text_input("Personel / ID ara", key="f_ara")
+    tarih_f = g3.date_input("Tarih aralığı", value=(), format="DD.MM.YYYY", key="f_tarih",
+                            help="Bu aralıkla kesişen izinleri gösterir (başlangıç ve bitiş seçin).")
     s1, s2, s3 = st.columns([2, 2, 1])
     s1.selectbox("Kayıtlı filtre", list(saved), index=None, placeholder="Seçin…", key="f_kayitli", on_change=_apply_saved)
     yeni_ad = s2.text_input("Bu filtreyi kaydet", placeholder="Örn: Onay bekleyen — Makine ekibi", key="f_yeni_ad")
@@ -53,6 +56,9 @@ if asama_f:
     df = df[df["asama"].isin(asama_f)]
 if pers_f:
     df = df[df["personel_adi"].isin(pers_f)]
+if len(tarih_f) == 2:
+    t0, t1 = (pd.Timestamp(t) for t in tarih_f)
+    df = df[(df["baslangic"] <= t1) & (df["bitis"] >= t0)]
 if ara.strip():
     df = df[df["personel_adi"].str.contains(ara.strip(), case=False, na=False) | df["id"].str.contains(ara.strip(), case=False, na=False)]
 df = df.sort_values("olusturma_zamani", ascending=False).reset_index(drop=True)
@@ -76,14 +82,14 @@ selected = st.session_state.get("secili_talep")
 left, right = st.columns([5, 4]) if selected else (st.container(), None)
 with left:
     event = st.dataframe(
-        view[["id", "personel_adi", "izin_turu", "baslangic", "bitis", "is_gunu", "Durum", "Aşamalar", "ek_sayisi"]],
+        view[["id", "personel_adi", "izin_turu", "sure", "baslangic", "bitis", "is_gunu", "Durum", "Aşamalar", "ek_sayisi"]],
         hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
         key=f"liste_tablo_{st.session_state.get('tablo_nonce', 0)}",
         column_config={
-            "id": "Talep ID", "personel_adi": "Personel", "izin_turu": "Tür",
+            "id": "Talep ID", "personel_adi": "Personel", "izin_turu": "Tür", "sure": "Süre",
             "baslangic": st.column_config.DateColumn("Başlangıç", format="DD.MM.YYYY"),
             "bitis": st.column_config.DateColumn("Bitiş", format="DD.MM.YYYY"),
-            "is_gunu": st.column_config.NumberColumn("İş günü", format="%d"),
+            "is_gunu": st.column_config.NumberColumn("İş günü", format="%g"),
             "ek_sayisi": st.column_config.NumberColumn("Ek", format="%d"),
         },
     )
@@ -109,4 +115,4 @@ if right is not None:
         with st.container(border=True):
             ui.render_detail(selected, "ls")
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

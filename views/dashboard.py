@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
-from core import calendar_utils, config, notify, services
+from core import calendar_utils, config, notify, rules, services
 from core.utils import fmt_date
 from ui import components as ui
 
@@ -60,7 +60,7 @@ def queue_list(items: list[dict], kind: str) -> None:
             ui.dialog_bulk(bulk, [r["id"] for r in items])
     for r in items[:15]:
         c = st.columns([5, 1, 2])
-        c[0].markdown(f"**{r['id']}** · {r['personel_adi']} · {fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} · {r['is_gunu']} iş günü")
+        c[0].markdown(f"**{r['id']}** · {r['personel_adi']} · {fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} · {rules.fmt_days(r['is_gunu'])} iş günü · {rules.sure_etiket(r)}")
         if c[1].button("Aç", key=f"q_{kind}_open_{r['id']}"):
             ui.open_request(r["id"])
         if kind == "onay" and ui.can("onay"):
@@ -103,4 +103,4 @@ if rows:
 else:
     st.caption("Önümüzdeki 14 günde izinli kişi yok.")
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

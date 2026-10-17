@@ -3,12 +3,12 @@ from datetime import date
 
 import streamlit as st
 
-from core import config, services
+from core import config, rules, services
 from ui import components as ui
 
 st.title("➕ Yeni İzin Talebi")
 if not ui.can("talep_gir"):
-    st.info("Bu rolün talep girişi yetkisi yok.")
+    st.info("Talep girişi yetkiniz yok.")
     st.stop()
 
 nonce = st.session_state.setdefault("yt_nonce", 0)
@@ -21,21 +21,27 @@ c1, c2 = st.columns(2)
 sel = c1.selectbox("Personel *", people + [NEW], index=None, placeholder="Seçin…", key=k("personel"))
 ad = c1.text_input("Yeni personel adı soyadı *", key=k("yeni_ad")) if sel == NEW else (sel or "")
 tur = c2.selectbox("İzin türü *", config.LEAVE_TYPES, key=k("tur"))
-d1, d2 = st.columns(2)
-start = d1.date_input("Başlangıç *", value=date.today(), format="DD.MM.YYYY", key=k("bas"))
-end = d2.date_input("Bitiş *", value=date.today(), format="DD.MM.YYYY", key=k("bit"))
+tipler = list(rules.SURE_ETIKET)
+sure = st.radio("Süre türü", tipler, format_func=rules.SURE_ETIKET.get, horizontal=True, key=k("sure"))
+d1, d2, d3 = st.columns(3)
+start = d1.date_input("Başlangıç *" if sure == "tam" else "Tarih *", value=date.today(), format="DD.MM.YYYY", key=k("bas"))
+if sure == "tam":
+    end = d2.date_input("Bitiş *", value=date.today(), format="DD.MM.YYYY", key=k("bit"))
+else:
+    end = start  # yarım gün / saatlik izin tek güne girilir
+saat = d2.number_input("Saat *", 0.5, 24.0, 2.0, step=0.5, key=k("saat")) if sure == "saatlik" else None
 aciklama = st.text_area("Açıklama", key=k("acik"), placeholder="İsteğe bağlı not")
 files = st.file_uploader("Ek dosyalar (rapor, dilekçe vb.)", accept_multiple_files=True, key=k("ek"),
                          type=[e.strip(".") for e in sorted(config.ALLOWED_EXT)])
 
 # --- Canlı önizleme -----------------------------------------------------------
-pv = services.preview_request(ad, tur, start, end)
+pv = services.preview_request(ad, tur, start, end, sure_tipi=sure, saat=saat)
 m = st.columns(4)
-m[0].metric("İş günü", pv["is_gunu"])
+m[0].metric("İş günü", rules.fmt_days(pv["is_gunu"]))
 m[1].metric("Takvim günü", pv["takvim_gun"])
 b = pv["bakiye"]
 if b:
-    m[2].metric("Kullanılabilir bakiye", f"{b['kullanilabilir']:g} gün", delta=f"{-pv['is_gunu']} gün", delta_color="off")
+    m[2].metric("Kullanılabilir bakiye", f"{b['kullanilabilir']:g} gün", delta=f"{-pv['is_gunu']:g} gün", delta_color="off")
     m[3].metric("Talepten sonra kalan", f"{b['kullanilabilir'] - pv['is_gunu']:g} gün")
 for e in pv["errors"]:
     st.error(e)
@@ -51,7 +57,8 @@ if st.button("Talebi kaydet", type="primary", disabled=blocked):
     if ui.user_ok():
         try:
             tid = services.create_request(ui.current_user(), ui.current_role(), ad, tur, start, end, aciklama,
-                                          [(f.name, f.getvalue()) for f in files or []], bakiye_override=override)
+                                          [(f.name, f.getvalue()) for f in files or []], bakiye_override=override,
+                                          sure_tipi=sure, saat=saat)
         except (ValueError, PermissionError, OSError) as exc:
             st.error(str(exc))  # form içeriği silinmez
         else:
@@ -59,4 +66,4 @@ if st.button("Talebi kaydet", type="primary", disabled=blocked):
             st.session_state["yt_nonce"] = nonce + 1
             st.rerun()
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0
