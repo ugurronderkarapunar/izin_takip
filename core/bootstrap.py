@@ -10,4 +10,4 @@ def init() -> None:
     calendar_utils.ensure_holidays()
     services.migrate()
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

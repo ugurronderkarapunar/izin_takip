@@ -6,6 +6,7 @@ from functools import lru_cache
 from io import BytesIO
 from typing import Any
 
+from . import rules
 from .utils import fmt_date, fmt_dt, now_str
 
 
@@ -17,7 +18,8 @@ def _rows(r: dict[str, Any], person: dict[str, Any]) -> list[tuple[str, str]]:
         ("İzin Türü", r["izin_turu"]),
         ("Başlangıç", fmt_date(r["baslangic"])),
         ("Bitiş", fmt_date(r["bitis"])),
-        ("Takvim Günü / İş Günü", f"{r['gun_sayisi']} / {r['is_gunu']}"),
+        ("Süre türü", rules.sure_etiket(r)),
+        ("Takvim Günü / İş Günü", f"{r['gun_sayisi']} / {rules.fmt_days(r['is_gunu'])}"),
         ("Açıklama", r.get("aciklama") or "—"),
         ("Durum", r["durum"]),
         ("Karar Veren / Zamanı", f"{r.get('karar_veren') or '—'} / {fmt_dt(r.get('onay_zamani'))}"),
@@ -25,7 +27,7 @@ def _rows(r: dict[str, Any], person: dict[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
-def build_docx(r: dict[str, Any], person: dict[str, Any]) -> bytes:
+def build_docx(r: dict[str, Any], person: dict[str, Any], verify_url: str | None = None) -> bytes:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
@@ -47,6 +49,11 @@ def build_docx(r: dict[str, Any], person: dict[str, Any]) -> bytes:
         sign.rows[0].cells[i].text = h
         sign.rows[1].cells[i].text = "\n\nAd Soyad / İmza / Tarih"
     doc.add_paragraph()
+    if verify_url:
+        from docx.shared import Cm
+        from . import verify
+        doc.add_picture(BytesIO(verify.qr_png(verify_url)), width=Cm(2.8))
+        doc.add_paragraph("Belgeyi doğrulamak için QR kodu okutun: " + verify_url)
     doc.add_paragraph(f"Bu belge İzin Takip Sistemi tarafından {now_str()} tarihinde üretilmiştir. Talep No: {r['id']}")
     buf = BytesIO()
     doc.save(buf)
@@ -74,7 +81,7 @@ def pdf_available() -> bool:
     return _find_font() is not None
 
 
-def build_pdf(r: dict[str, Any], person: dict[str, Any]) -> bytes | None:
+def build_pdf(r: dict[str, Any], person: dict[str, Any], verify_url: str | None = None) -> bytes | None:
     """Türkçe karakterli bir TTF bulunamazsa None döner (Word çıktısı yine kullanılabilir)."""
     if not pdf_available():
         return None
@@ -96,10 +103,16 @@ def build_pdf(r: dict[str, Any], person: dict[str, Any]) -> bytes | None:
     pdf.ln()
     for _ in range(3):
         pdf.cell(w, 22, "Ad Soyad / İmza / Tarih", border=1, align="C")
-    pdf.ln(30)
+    pdf.ln(8)
+    if verify_url:
+        from . import verify
+        pdf.image(BytesIO(verify.qr_png(verify_url)), w=28)
+        pdf.set_font("U", size=8)
+        pdf.multi_cell(0, 5, "Belgeyi doğrulamak için QR kodu okutun: " + verify_url, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(6)
     pdf.set_font("U", size=9)
     pdf.cell(0, 6, f"Bu belge İzin Takip Sistemi tarafından {now_str()} tarihinde üretilmiştir. Talep No: {r['id']}",
              new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

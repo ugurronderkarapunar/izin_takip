@@ -3,17 +3,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo
 
-APP_VERSION = "2.3"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
+APP_VERSION = "3.0"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 # Veriyi başka bir klasöre almak için: IZIN_DATA_DIR ortam değişkeni
 DATA_DIR = Path(os.environ.get("IZIN_DATA_DIR", BASE_DIR / "data"))
 
 REQUEST_DB = DATA_DIR / "request_db.json"
-AUDIT_LOG = DATA_DIR / "audit_logs.json"
+AUDIT_LOG = DATA_DIR / "audit_logs.json"          # eski sürüm (otomatik JSONL'e dönüştürülür)
+AUDIT_JSONL = DATA_DIR / "audit_logs.jsonl"
 PERSONNEL_DB = DATA_DIR / "personnel.json"
 HOLIDAY_DB = DATA_DIR / "holidays.json"
 SETTINGS_DB = DATA_DIR / "settings.json"
@@ -49,8 +49,10 @@ ACTIVE_STATUSES = {S_PENDING, S_APPROVED}
 STAGES = ["Onay bekliyor", "Çıktı bekliyor", "Teslim bekliyor", "SAP bekliyor", "Tamamlandı", "Kapalı", "Silindi"]
 
 # NOT: Roller kimlik doğrulama değildir; arayüzü sadeleştirir ve işlemleri loglar.
-ROLES = ["Personel", "Yönetici", "Planlama", "Admin"]
+ROLES = ["Kullanıcı"]  # tek rütbe: herkes her işlemi yapabilir (işlemler kullanıcı adıyla loglanır)
+ALL_PERMS = {"talep_gir", "ek_ekle", "onay", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "duzenle", "admin"}
 PERMISSIONS: dict[str, set[str]] = {
+    "Kullanıcı": set(ALL_PERMS),
     "Personel": {"talep_gir", "ek_ekle"},
     "Yönetici": {"talep_gir", "ek_ekle", "onay", "duzenle"},
     "Planlama": {"talep_gir", "ek_ekle", "cikti", "teslim", "sap", "duzeltme", "import", "sil", "duzenle"},
@@ -77,17 +79,13 @@ WEEKEND_DAYS = {5, 6}  # Cumartesi, Pazar
 ALLOWED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".docx", ".xlsx"}
 MAX_UPLOAD_MB = 10
 
-DEFAULT_SETTINGS: dict[str, Any] = {
-    "yillik_hak_varsayilan": 20,
-    "esik_ayni_anda": 3,          # aynı gün izinli olabilecek kişi sayısı eşiği
-    "uyari_bekleyen_gun": 2,      # onay bekleyen talep uyarısı (gün)
-    "uyari_cikti_gun": 1,         # onaylandı ama çıktı alınmadı (gün)
-    "uyari_teslim_gun": 2,        # çıktı alındı ama İK'ya teslim edilmedi (gün)
-    "uyari_sap_gun": 3,           # onaylandı ama SAP girişi yok (gün)
-    "yedek_saklama_gun": 30,
-    "yonetici_telefon": "", "yonetici_eposta": "",
-    "ik_telefon": "", "ik_eposta": "",
-    "kayitli_filtreler": {},
-}
+# Veritabanı bağlantısı: ortam değişkeni (Streamlit secrets'tan app.py aktarır). Boşsa dosya depolama kullanılır.
+def database_url() -> str:
+    return (os.environ.get("IZIN_DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
 
-# END-OF-FILE v2.3
+
+def env(name: str, default: str = "") -> str:
+    """IZIN_<ADI> ortam değişkenini (secrets dahil) okur."""
+    return os.environ.get(f"IZIN_{name.upper()}", default).strip()
+
+# END-OF-FILE v3.0

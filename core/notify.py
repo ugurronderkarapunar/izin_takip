@@ -29,4 +29,4 @@ def alert_message(alert: dict[str, Any]) -> tuple[str, str]:
             f"işlem bekleniyor: {alert['mesaj']}. Bilgilerinize.")
     return subject, body
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

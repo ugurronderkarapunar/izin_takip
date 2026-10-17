@@ -9,30 +9,50 @@ import secrets
 from typing import Any
 
 from . import config
-from .storage import JsonStore, data_lock
+from .storage import JsonStore, get_backend, meta_store, transaction
+from .models import LogEntryModel
 from .utils import now_str
 
-logs_store = JsonStore(config.AUDIT_LOG, list)
+
+
+class _AuditLog:
+    """Denetim günlüğü deposu: dosyada JSONL, veritabanında yalnızca-ekleme tablo."""
+
+    def read(self) -> list[dict[str, Any]]:
+        return get_backend().audit_read()
+
+    def last(self) -> dict[str, Any] | None:
+        return get_backend().audit_last()
+
+
+logs_store = _AuditLog()
 anchors_store = JsonStore(config.ANCHOR_DB, list)
 
 GENESIS = "0" * 64
 ALGO = "hmac-sha256"
 LEGACY_FIELDS = ["log_id", "zaman", "kullanici", "talep_id", "islem", "eski_durum", "yeni_durum", "detay"]
 HMAC_FIELDS = LEGACY_FIELDS + ["rol", "algo"]
-_KEY_CACHE: bytes | None = None
+_KEY_CACHE: tuple[str, bytes] | None = None
 
 
 def key_source() -> str:
-    return "ortam değişkeni (IZIN_AUDIT_KEY)" if os.environ.get("IZIN_AUDIT_KEY", "").strip() else "dosya (data/.audit_key)"
+    if os.environ.get("IZIN_AUDIT_KEY", "").strip():
+        return "ortam değişkeni / secrets (IZIN_AUDIT_KEY)"
+    return "dosya (data/.audit_key)" if get_backend().kind == "dosya" else "veritabanı (meta) — secrets'a taşımanız önerilir"
 
 
 def _key() -> bytes:
+    """Doğrulama anahtarı: IZIN_AUDIT_KEY > (dosya modunda) data/.audit_key > (veritabanı modunda) meta belgesi."""
     global _KEY_CACHE
     env = os.environ.get("IZIN_AUDIT_KEY", "").strip()
     if env:
         return env.encode("utf-8")
-    if _KEY_CACHE is None or not config.KEY_FILE.exists():
-        with data_lock():
+    backend = get_backend()
+    tag = f"{backend.kind}:{id(backend)}"
+    if _KEY_CACHE and _KEY_CACHE[0] == tag and (backend.kind != "dosya" or config.KEY_FILE.exists()):
+        return _KEY_CACHE[1]
+    with transaction():
+        if backend.kind == "dosya":
             if not config.KEY_FILE.exists():
                 config.DATA_DIR.mkdir(parents=True, exist_ok=True)
                 config.KEY_FILE.write_text(secrets.token_hex(32), encoding="utf-8")
@@ -40,8 +60,15 @@ def _key() -> bytes:
                     os.chmod(config.KEY_FILE, 0o600)
                 except OSError:
                     pass
-        _KEY_CACHE = config.KEY_FILE.read_text(encoding="utf-8").strip().encode("utf-8")
-    return _KEY_CACHE
+            key = config.KEY_FILE.read_text(encoding="utf-8").strip()
+        else:
+            meta = meta_store.read()
+            if "audit_key" not in meta:
+                meta["audit_key"] = secrets.token_hex(32)
+                meta_store.write(meta)
+            key = meta["audit_key"]
+    _KEY_CACHE = (tag, key.encode("utf-8"))
+    return _KEY_CACHE[1]
 
 
 def _digest(entry: dict[str, Any], prev: str) -> str:
@@ -55,40 +82,41 @@ def _digest(entry: dict[str, Any], prev: str) -> str:
 
 def append_log(kullanici: str, rol: str, talep_id: str, islem: str,
                eski: str = "-", yeni: str = "-", detay: str = "") -> None:
-    with data_lock():
-        logs = logs_store.read()
-        prev = logs[-1]["hash"] if logs else GENESIS
+    backend = get_backend()
+    with transaction():
+        last = backend.audit_last()
+        prev = last["hash"] if last else GENESIS
         entry: dict[str, Any] = {
-            "log_id": len(logs) + 1, "zaman": now_str(), "kullanici": kullanici, "rol": rol,
+            "log_id": (last["log_id"] + 1) if last else 1, "zaman": now_str(), "kullanici": kullanici, "rol": rol,
             "talep_id": talep_id, "islem": islem, "eski_durum": eski, "yeni_durum": yeni,
             "detay": detay, "algo": ALGO, "onceki_hash": prev,
         }
         entry["hash"] = _digest(entry, prev)
-        logs.append(entry)
-        logs_store.write(logs)
-        _maybe_anchor(logs)
+        LogEntryModel.model_validate(entry)  # alan adı / tip hatalarını erken yakala
+        backend.audit_append(entry)
+        _maybe_anchor(entry)
 
 
 def _anchor_of(entry: dict[str, Any]) -> dict[str, Any]:
     return {"tarih": now_str(), "log_id": entry["log_id"], "hash": entry["hash"]}
 
 
-def _maybe_anchor(logs: list[dict[str, Any]]) -> None:
-    """Günün ilk işleminde zincirin o anki ucunu ayrı dosyaya çapalar."""
+def _maybe_anchor(entry: dict[str, Any]) -> None:
+    """Günün ilk işleminde zincirin o anki ucunu ayrı belgeye çapalar."""
     anchors = anchors_store.read()
     if anchors and anchors[-1]["tarih"][:10] == now_str()[:10]:
         return
-    anchors.append(_anchor_of(logs[-1]))
+    anchors.append(_anchor_of(entry))
     anchors_store.write(anchors)
 
 
 def anchor_now() -> dict[str, Any]:
-    with data_lock():
-        logs = logs_store.read()
-        if not logs:
+    with transaction():
+        last = logs_store.last()
+        if not last:
             raise ValueError("Henüz log kaydı yok.")
         anchors = anchors_store.read()
-        a = _anchor_of(logs[-1])
+        a = _anchor_of(last)
         anchors.append(a)
         anchors_store.write(anchors)
         return a
@@ -167,6 +195,8 @@ def verify_consistency(requests: list[dict[str, Any]], logs: list[dict[str, Any]
             s["teslim"] = True
         elif op == "İK Teslim Geri Alındı":
             s["teslim"] = False
+        elif op == "Çıktı Geri Alındı":
+            s["cikti"] = False
         elif op == "SAP Girişi":
             s["sap"] = True
         elif op == "SAP Girişi Geri Alındı":
@@ -199,4 +229,4 @@ def verify_consistency(requests: list[dict[str, Any]], logs: list[dict[str, Any]
             issues.append(f"{tid}: logda var ama request_db'de yok (talep silinmiş olabilir).")
     return issues
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

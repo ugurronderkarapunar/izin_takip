@@ -46,4 +46,4 @@ def safe_filename(name: str) -> str:
     base = re.sub(r"[^\w.\-]+", "_", name, flags=re.UNICODE).strip("._")
     return base[:80] or "dosya"
 
-# END-OF-FILE v2.3
+# END-OF-FILE v3.0

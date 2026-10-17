@@ -5,41 +5,32 @@ ve audit loguna işlenir.
 """
 from __future__ import annotations
 
-import copy
 import hashlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Any
 
 import pandas as pd
 
-from . import audit, backup, calendar_utils, config
+from . import audit, backup, calendar_utils, config, models, rules, storage
 from .config import (ACTIVE_STATUSES, ALLOWED_TRANSITIONS, ANNUAL, LEAVE_TYPES,
                      S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED)
-from .storage import JsonStore, meta_store, transaction
-from .utils import days_since, fmt_date, now, now_str, parse_date, safe_filename
+from .models import PersonModel, RequestModel, SettingsModel, normalize, validate_dump
+from .storage import JsonStore, get_backend, meta_store, transaction
+from .utils import days_since, fmt_date, now, now_str, safe_filename
 
 Request = dict[str, Any]
 
 requests_store = JsonStore(config.REQUEST_DB, list)
 personnel_store = JsonStore(config.PERSONNEL_DB, list)
 settings_store = JsonStore(config.SETTINGS_DB, dict)
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _tx():
-    """Tüm veri depolarını kapsayan işlem: hata olursa hepsi eski haline döner."""
-    return transaction(requests_store, audit.logs_store, audit.anchors_store, meta_store,
-                       personnel_store, settings_store, calendar_utils.holidays_store)
+    """Tüm yazmaları kapsayan işlem: hata olursa hepsi geri alınır."""
+    return transaction()
 
-_REQ_DEFAULTS: dict[str, Any] = {
-    "is_gunu": None, "onay_zamani": None, "karar_veren": None,
-    "cikti_alindi": False, "cikti_zamani": None, "cikti_alan": None,
-    "ik_teslim": False, "ik_teslim_tarihi": None, "ik_teslim_alan": None, "teslim_gecmisi": [],
-    "sap_girildi": False, "sap_tarihi": None, "sap_giren": None, "sap_notu": None,
-    "ekler": [],
-    "silindi": False, "silinme_zamani": None, "silen": None, "silme_gerekcesi": None,
-}
 IMPORT_COLUMNS = ["Personel", "İzin Türü", "Başlangıç", "Bitiş", "Açıklama"]
 
 
@@ -60,12 +51,30 @@ def _need_user(user: str) -> None:
         raise ValueError("Kullanıcı adı gerekli.")
 
 
+def _gunluk_saat() -> float:
+    return float(get_settings()["gunluk_calisma_saati"])
+
+
+def _compute_days(sure_tipi: str, saat: float | None, start: date, end: date) -> float:
+    full, half = calendar_utils.holiday_info()
+    return rules.leave_days(sure_tipi, saat, start, end, full, half, _gunluk_saat())
+
+
 def _normalize(r: Request) -> Request:
-    for k, v in _REQ_DEFAULTS.items():
-        r.setdefault(k, copy.deepcopy(v))
+    """Eksik alanları varsayılanla doldurur, bilinmeyenleri atar (katı doğrulama yazımda yapılır)."""
+    r = normalize(RequestModel, r)
     if r["is_gunu"] is None:
-        r["is_gunu"] = calendar_utils.work_days(date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"]))
+        r["is_gunu"] = _compute_days(r["sure_tipi"], r["saat"], date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"]))
     return r
+
+
+def _save_requests(requests: list[Request]) -> None:
+    """Yazmadan önce her talebi katı doğrular: yazım hatası / yanlış tip kaydı engeller (işlem geri alınır)."""
+    requests_store.write([validate_dump(RequestModel, r) for r in requests])
+
+
+def _save_people(people: list[dict[str, Any]]) -> None:
+    personnel_store.write([validate_dump(PersonModel, p) for p in people])
 
 
 def load_requests(include_deleted: bool = False) -> list[Request]:
@@ -112,7 +121,11 @@ def _next_id(requests: list[Request]) -> str:
 # Ayarlar, kayıtlı filtreler
 # ----------------------------------------------------------------------------
 def get_settings() -> dict[str, Any]:
-    return {**copy.deepcopy(config.DEFAULT_SETTINGS), **settings_store.read()}
+    try:
+        return SettingsModel(**settings_store.read()).model_dump()
+    except ValueError:  # bozuk ayar değeri uygulamayı düşürmesin
+        storage.log_event("uyarı", "ayar", "Ayarlar doğrulanamadı; varsayılanlar kullanıldı.")
+        return SettingsModel().model_dump()
 
 
 def save_settings(user: str, role: str, new: dict[str, Any]) -> None:
@@ -120,11 +133,12 @@ def save_settings(user: str, role: str, new: dict[str, Any]) -> None:
     _need_user(user)
     with _tx():
         cur = get_settings()
-        changed = {k: v for k, v in new.items() if k in config.DEFAULT_SETTINGS and k != "kayitli_filtreler" and cur.get(k) != v}
+        changed = {k: v for k, v in new.items() if k in SettingsModel.model_fields and k != "kayitli_filtreler" and cur.get(k) != v}
         if not changed:
             return
-        cur.update(changed)
-        settings_store.write(cur)
+        merged = {**cur, **changed}
+        SettingsModel(**merged)  # doğrula; geçersizse ValidationError (ValueError) fırlar
+        settings_store.write(merged)
         audit.append_log(user, role, "-", "Ayarlar Güncellendi", detay="; ".join(f"{k}={v}" for k, v in changed.items()))
 
 
@@ -149,26 +163,26 @@ def delete_filter(name: str) -> None:
 # Personel ve tatiller
 # ----------------------------------------------------------------------------
 def list_personnel(active_only: bool = False) -> list[dict[str, Any]]:
-    people = personnel_store.read()
-    return [p for p in people if p.get("aktif", True)] if active_only else people
+    people = [normalize(PersonModel, p) for p in personnel_store.read()]
+    return [p for p in people if p["aktif"]] if active_only else people
 
 
 def get_person(ad: str) -> dict[str, Any] | None:
     key = ad.strip().casefold()
-    return next((p for p in personnel_store.read() if p["ad"].strip().casefold() == key), None)
+    return next((p for p in list_personnel() if p["ad"].strip().casefold() == key), None)
 
 
 def _add_person_unlocked(user: str, role: str, ad: str, hak: float | None = None, devreden: float = 0,
                          telefon: str = "", ekip: str = "") -> dict[str, Any]:
-    people = personnel_store.read()
+    people = [normalize(PersonModel, p) for p in personnel_store.read()]
     if any(p["ad"].strip().casefold() == ad.strip().casefold() for p in people):
         raise ValueError(f"'{ad}' zaten kayıtlı.")
-    person = {"ad": ad.strip(), "ekip": ekip.strip(), "telefon": telefon.strip(),
-              "yillik_hak": hak if hak is not None else get_settings()["yillik_hak_varsayilan"],
-              "devreden": 0, "hak_yillik": {},
-              "devreden_yillik": {str(now().year): devreden} if devreden else {}, "aktif": True}
+    person = models.defaults(PersonModel)
+    person.update(ad=ad.strip(), ekip=ekip.strip(), telefon=telefon.strip(),
+                  yillik_hak=hak if hak is not None else get_settings()["yillik_hak_varsayilan"],
+                  devreden_yillik={str(now().year): devreden} if devreden else {})
     people.append(person)
-    personnel_store.write(people)
+    _save_people(people)
     audit.append_log(user, role, "-", "Personel Eklendi", detay=f"{person['ad']} | hak={person['yillik_hak']} devreden={devreden}")
     return person
 
@@ -186,64 +200,70 @@ def add_personnel(user: str, role: str, ad: str, hak: float | None = None, devre
 def update_personnel(user: str, role: str, ad: str, not_: str = "", **fields: Any) -> None:
     _need(role, "admin")
     _need_user(user)
-    allowed = {"ekip", "telefon", "yillik_hak", "aktif"}
+    allowed = {"ekip", "telefon", "yillik_hak", "aktif", "ise_giris"}
     with _tx():
-        people = personnel_store.read()
+        people = [normalize(PersonModel, p) for p in personnel_store.read()]
         p = next((x for x in people if x["ad"] == ad), None)
         if p is None:
             raise ValueError("Personel bulunamadı.")
         diffs = []
         for k, v in fields.items():
-            if k in allowed and p.get(k) != v:
+            if k not in allowed:
+                raise ValueError(f"Geçersiz alan: {k}")
+            if p.get(k) != v:
                 diffs.append(f"{k}: {p.get(k)} → {v}")
                 p[k] = v
         if diffs:
-            personnel_store.write(people)
+            _save_people(people)
             audit.append_log(user, role, "-", "Personel Güncellendi",
                              detay=f"{ad} | " + "; ".join(diffs) + (f" | Not: {not_.strip()}" if not_.strip() else ""))
 
 
-def add_holiday(user: str, role: str, tarih: date, ad: str) -> None:
+def add_holiday(user: str, role: str, tarih: date, ad: str, yarim: bool = False) -> None:
     _need(role, "admin")
     _need_user(user)
     with _tx():
-        hol = calendar_utils.holidays_store.read()
+        hol = calendar_utils.load_holidays()
         if any(h["tarih"] == tarih.isoformat() for h in hol):
             raise ValueError("Bu tarih zaten tatil olarak kayıtlı.")
-        hol.append({"tarih": tarih.isoformat(), "ad": ad.strip() or "Tatil"})
-        calendar_utils.holidays_store.write(sorted(hol, key=lambda h: h["tarih"]))
-        audit.append_log(user, role, "-", "Tatil Eklendi", detay=f"{tarih.isoformat()} {ad}")
+        hol.append({"tarih": tarih.isoformat(), "ad": ad.strip() or "Tatil", "yarim": yarim})
+        calendar_utils.save_holidays(hol)
+        audit.append_log(user, role, "-", "Tatil Eklendi", detay=f"{tarih.isoformat()} {ad}" + (" (yarım gün)" if yarim else ""))
 
 
 def remove_holiday(user: str, role: str, tarih: str) -> None:
     _need(role, "admin")
     _need_user(user)
     with _tx():
-        hol = calendar_utils.holidays_store.read()
+        hol = calendar_utils.load_holidays()
         new = [h for h in hol if h["tarih"] != tarih]
         if len(new) == len(hol):
             raise ValueError("Tatil bulunamadı.")
-        calendar_utils.holidays_store.write(new)
+        calendar_utils.save_holidays(new)
         audit.append_log(user, role, "-", "Tatil Silindi", detay=tarih)
 
 
 # ----------------------------------------------------------------------------
 # Bakiye, çakışma, yoğunluk
 # ----------------------------------------------------------------------------
-def find_overlap(requests: list[Request], personel: str, start: date, end: date) -> Request | None:
+def find_overlap(requests: list[Request], personel: str, start: date, end: date,
+                 sure_tipi: str = "tam", saat: float | None = None) -> Request | None:
     key = personel.strip().casefold()
-    for r in requests:
-        if r["personel_adi"].strip().casefold() != key or r["durum"] not in ACTIVE_STATUSES:
-            continue
-        if start <= date.fromisoformat(r["bitis"]) and date.fromisoformat(r["baslangic"]) <= end:
+    cand = {"baslangic": start.isoformat(), "bitis": end.isoformat(), "sure_tipi": sure_tipi, "saat": saat}
+    g = _gunluk_saat()
+    mine = [r for r in requests if r["personel_adi"].strip().casefold() == key and r["durum"] in ACTIVE_STATUSES]
+    for r in mine:
+        if rules.conflicts(r, cand, g):
             return r
-    return None
+    return rules.over_capacity(mine, cand, g)
 
 
-def _year_work_days(r: Request, year: int, hol: set[date]) -> int:
+def _leave_days_in_year(r: Request, year: int, full: set[date], half: set[date]) -> float:
+    if r.get("sure_tipi", "tam") != "tam":  # yarım gün / saatlik: tek gün
+        return float(r["is_gunu"]) if date.fromisoformat(r["baslangic"]).year == year else 0.0
     lo = max(date.fromisoformat(r["baslangic"]), date(year, 1, 1))
     hi = min(date.fromisoformat(r["bitis"]), date(year, 12, 31))
-    return calendar_utils.work_days(lo, hi, hol) if lo <= hi else 0
+    return calendar_utils.work_days(lo, hi, full, half) if lo <= hi else 0.0
 
 
 def _year_value(p: dict[str, Any], yearly_key: str, base_key: str, year: int, default: float) -> float:
@@ -252,21 +272,32 @@ def _year_value(p: dict[str, Any], yearly_key: str, base_key: str, year: int, de
     return yearly[str(year)] if str(year) in yearly else p.get(base_key, default)
 
 
+def entitlement(p: dict[str, Any], year: int) -> tuple[float, str]:
+    """Yıllık izin hakkı ve kaynağı: elle girilmiş > kıdemden hesaplanan > varsayılan."""
+    yearly = p.get("hak_yillik") or {}
+    if str(year) in yearly:
+        return float(yearly[str(year)]), "elle girilmiş"
+    s = get_settings()
+    if s["otomatik_hak"] and p.get("ise_giris"):
+        return rules.kidem_hakki(date.fromisoformat(p["ise_giris"]), year, s["kidem_tablosu"]), "kıdemden hesaplandı"
+    return float(p.get("yillik_hak", s["yillik_hak_varsayilan"])), "varsayılan"
+
+
 def balance_for(ad: str, year: int, requests: list[Request] | None = None) -> dict[str, float]:
     requests = load_requests() if requests is None else requests
     p = get_person(ad) or {}
-    hol = calendar_utils.holiday_set()
-    hak = _year_value(p, "hak_yillik", "yillik_hak", year, get_settings()["yillik_hak_varsayilan"])
-    dev = _year_value(p, "devreden_yillik", "devreden", year, 0)
+    full, half = calendar_utils.holiday_info()
+    hak, _ = entitlement(p, year)
+    dev = float(_year_value(p, "devreden_yillik", "devreden", year, 0))
     key = ad.strip().casefold()
-    used = pend = 0
+    used = pend = 0.0
     for r in requests:
         if r["personel_adi"].strip().casefold() != key or r["izin_turu"] != ANNUAL:
             continue
         if r["durum"] == S_APPROVED:
-            used += _year_work_days(r, year, hol)
+            used += _leave_days_in_year(r, year, full, half)
         elif r["durum"] == S_PENDING:
-            pend += _year_work_days(r, year, hol)
+            pend += _leave_days_in_year(r, year, full, half)
     total = hak + dev
     return {"hak": hak, "devreden": dev, "kullanilan": used, "bekleyen": pend,
             "kalan": total - used, "kullanilabilir": total - used - pend}
@@ -286,9 +317,9 @@ def balance_table(year: int) -> pd.DataFrame:
 def crowded_days(requests: list[Request], start: date, end: date, personel: str,
                  esik: int, hol: set[date] | None = None) -> list[tuple[date, int]]:
     hol = calendar_utils.holiday_set() if hol is None else hol
-    people = calendar_utils.daily_people(requests, start, end, ACTIVE_STATUSES, exclude=personel)
-    return [(d, len(s) + 1) for d, s in sorted(people.items())
-            if len(s) + 1 > esik and calendar_utils.is_workday(d, hol)]
+    people = calendar_utils.daily_people(requests, start, end, ACTIVE_STATUSES, exclude=personel, min_fraction=0.5)
+    return [(d, len(p) + 1) for d, p in sorted(people.items())
+            if len(p) + 1 > esik and calendar_utils.is_workday(d, hol)]
 
 
 def people_on_leave(requests: list[Request], day: date, statuses: set[str] | None = None) -> list[str]:
@@ -296,29 +327,37 @@ def people_on_leave(requests: list[Request], day: date, statuses: set[str] | Non
     return sorted(calendar_utils.daily_people(requests, day, day, statuses)[day])
 
 
-def preview_request(personel: str, tur: str, start: date, end: date, exclude_id: str | None = None) -> dict[str, Any]:
+def preview_request(personel: str, tur: str, start: date, end: date, exclude_id: str | None = None,
+                    sure_tipi: str = "tam", saat: float | None = None) -> dict[str, Any]:
     """Kaydetmeden önce: hata, uyarı, iş günü, bakiye ve ekip yoğunluğu."""
-    out: dict[str, Any] = {"errors": [], "warnings": [], "is_gunu": 0, "takvim_gun": 0,
+    out: dict[str, Any] = {"errors": [], "warnings": [], "is_gunu": 0.0, "takvim_gun": 0,
                            "bakiye": None, "bakiye_yetersiz": False}
     if end < start:
         out["errors"].append("Bitiş tarihi, başlangıç tarihinden önce olamaz.")
         return out
-    hol = calendar_utils.holiday_set()
+    if sure_tipi not in models.SURE_TIPLERI:
+        out["errors"].append("Geçersiz süre türü.")
+        return out
+    full, half = calendar_utils.holiday_info()
     out["takvim_gun"] = (end - start).days + 1
-    out["is_gunu"] = calendar_utils.work_days(start, end, hol)
+    try:
+        out["is_gunu"] = rules.leave_days(sure_tipi, saat, start, end, full, half, _gunluk_saat())
+    except ValueError as exc:
+        out["errors"].append(str(exc))
+        return out
     if out["is_gunu"] == 0:
         out["errors"].append("Seçilen aralıkta hiç iş günü yok (hafta sonu / resmî tatil).")
     if personel.strip():
         requests = [r for r in load_requests() if r["id"] != exclude_id]
-        ov = find_overlap(requests, personel, start, end)
+        ov = find_overlap(requests, personel, start, end, sure_tipi, saat)
         if ov:
             out["errors"].append(f"Aynı personelin çakışan aktif talebi var: {ov['id']} "
-                                 f"({fmt_date(ov['baslangic'])} – {fmt_date(ov['bitis'])}, {ov['durum']}).")
+                                 f"({fmt_date(ov['baslangic'])} – {fmt_date(ov['bitis'])}, {rules.sure_etiket(ov)}, {ov['durum']}).")
         if tur == ANNUAL:
             b = balance_for(personel, start.year, requests)
             out["bakiye"] = b
-            out["bakiye_yetersiz"] = out["is_gunu"] > b["kullanilabilir"]
-        crowded = crowded_days(requests, start, end, personel, int(get_settings()["esik_ayni_anda"]), hol)
+            out["bakiye_yetersiz"] = out["is_gunu"] > b["kullanilabilir"] + 1e-9
+        crowded = crowded_days(requests, start, end, personel, int(get_settings()["esik_ayni_anda"]), full)
         if crowded:
             txt = ", ".join(f"{d:%d.%m} ({n} kişi)" for d, n in crowded[:6])
             out["warnings"].append(f"Ekip yoğunluğu eşiği aşılıyor: {txt}" + (" …" if len(crowded) > 6 else ""))
@@ -339,11 +378,9 @@ def _validate_attachment(name: str, data: bytes) -> None:
 
 
 def _store_attachment(user: str, req: Request, name: str, data: bytes) -> dict[str, Any]:
-    folder = config.ATTACH_DIR / req["id"]
-    folder.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(data).hexdigest()
     stored = f"{digest[:8]}_{safe_filename(name)}"
-    (folder / stored).write_bytes(data)
+    get_backend().put_file(req["id"], stored, data)
     meta = {"dosya": stored, "orijinal_ad": name, "boyut": len(data), "sha256": digest,
             "yukleyen": user, "zaman": now_str()}
     req["ekler"].append(meta)
@@ -358,13 +395,12 @@ def add_attachment(user: str, role: str, talep_id: str, name: str, data: bytes) 
         requests = [_normalize(r) for r in requests_store.read()]
         req = _find(requests, talep_id)
         meta = _store_attachment(user, req, name, data)
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "Ek Eklendi", detay=f"{name} | sha256={meta['sha256'][:16]}")
 
 
 def read_attachment(talep_id: str, stored: str) -> bytes:
-    path = config.ATTACH_DIR / talep_id / stored.split("/")[-1].split("\\")[-1]
-    return path.read_bytes()
+    return get_backend().get_file(talep_id, stored)
 
 
 # ----------------------------------------------------------------------------
@@ -372,7 +408,7 @@ def read_attachment(talep_id: str, stored: str) -> bytes:
 # ----------------------------------------------------------------------------
 def create_request(user: str, role: str, personel: str, tur: str, start: date, end: date,
                    aciklama: str = "", ekler: list[tuple[str, bytes]] | None = None,
-                   bakiye_override: bool = False) -> str:
+                   bakiye_override: bool = False, sure_tipi: str = "tam", saat: float | None = None) -> str:
     _need(role, "talep_gir")
     _need_user(user)
     personel = personel.strip()
@@ -383,13 +419,15 @@ def create_request(user: str, role: str, personel: str, tur: str, start: date, e
     ekler = ekler or []
     for name, data in ekler:
         _validate_attachment(name, data)
+    if sure_tipi != "tam":
+        end = start  # yarım gün / saatlik izin tek güne girilir
     with _tx():
-        pv = preview_request(personel, tur, start, end)
+        pv = preview_request(personel, tur, start, end, sure_tipi=sure_tipi, saat=saat)
         if pv["errors"]:
             raise ValueError(pv["errors"][0])
         if pv["bakiye_yetersiz"] and not bakiye_override:
             b = pv["bakiye"]
-            raise BalanceError(f"Yıllık izin bakiyesi yetersiz: kullanılabilir {b['kullanilabilir']:g} gün, talep {pv['is_gunu']} iş günü.")
+            raise BalanceError(f"Yıllık izin bakiyesi yetersiz: kullanılabilir {b['kullanilabilir']:g} gün, talep {pv['is_gunu']:g} iş günü.")
         if get_person(personel) is None:
             _add_person_unlocked(user, role, personel)
         requests = [_normalize(r) for r in requests_store.read()]
@@ -398,16 +436,17 @@ def create_request(user: str, role: str, personel: str, tur: str, start: date, e
             "id": tid, "personel_adi": personel, "izin_turu": tur,
             "baslangic": start.isoformat(), "bitis": end.isoformat(),
             "gun_sayisi": pv["takvim_gun"], "is_gunu": pv["is_gunu"],
+            "sure_tipi": sure_tipi, "saat": saat if sure_tipi == "saatlik" else None,
             "aciklama": aciklama.strip(), "durum": S_PENDING,
             "olusturan": user, "olusturma_zamani": now_str(),
             "son_guncelleyen": user, "son_guncelleme": now_str(),
         }
-        _normalize(req)
+        req = _normalize(req)
         metas = [_store_attachment(user, req, n, d) for n, d in ekler]
         requests.append(req)
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, tid, "Talep Oluşturuldu", "-", S_PENDING,
-                         f"{personel} | {tur} | {start.isoformat()} → {end.isoformat()} | {pv['is_gunu']} iş günü"
+                         f"{personel} | {tur} | {start.isoformat()} → {end.isoformat()} | {rules.sure_etiket(req)} | {pv['is_gunu']:g} iş günü"
                          + (" | bakiye aşımı onaylandı" if pv["bakiye_yetersiz"] else ""))
         for m in metas:
             audit.append_log(user, role, tid, "Ek Eklendi", detay=f"{m['orijinal_ad']} | sha256={m['sha256'][:16]}")
@@ -428,7 +467,7 @@ def update_status(user: str, role: str, talep_id: str, yeni: str, not_: str = ""
         req.update(durum=yeni, son_guncelleyen=user, son_guncelleme=now_str())
         if yeni in (S_APPROVED, S_REJECTED):
             req.update(onay_zamani=now_str(), karar_veren=user)
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "Durum Değişti", eski, yeni, not_.strip())
 
 
@@ -443,7 +482,7 @@ def mark_printed(user: str, role: str, talep_id: str) -> None:
         if req["cikti_alindi"]:
             raise ValueError("Çıktı zaten alındı olarak işaretli.")
         req.update(cikti_alindi=True, cikti_zamani=now_str(), cikti_alan=user, son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "Çıktı Alındı", req["durum"], req["durum"], "İzin kağıdı çıktısı alındı")
 
 
@@ -465,7 +504,7 @@ def mark_delivered(user: str, role: str, talep_id: str, tarih: date, alan: str) 
             raise ValueError("Teslim zaten kayıtlı. Hata varsa 'Teslimi düzelt / geri al' kullanın.")
         req.update(ik_teslim=True, ik_teslim_tarihi=tarih.isoformat(), ik_teslim_alan=alan.strip(),
                    son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "İK Teslim", req["durum"], req["durum"],
                          f"Teslim tarihi: {tarih.isoformat()} | Teslim alan: {alan.strip()}")
 
@@ -493,7 +532,7 @@ def correct_delivery(user: str, role: str, talep_id: str, tarih: date, alan: str
             raise ValueError("Bu talepte düzeltilecek bir teslim kaydı yok.")
         old = _push_delivery_history(req, "Düzeltildi", user, gerekce.strip())
         req.update(ik_teslim_tarihi=tarih.isoformat(), ik_teslim_alan=alan.strip(), son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "İK Teslim Düzeltildi", req["durum"], req["durum"],
                          f"Eski: {old} → Yeni: {tarih.isoformat()} / {alan.strip()} | Gerekçe: {gerekce.strip()}")
 
@@ -510,7 +549,7 @@ def revoke_delivery(user: str, role: str, talep_id: str, gerekce: str) -> None:
             raise ValueError("Bu talepte geri alınacak bir teslim kaydı yok.")
         old = _push_delivery_history(req, "Geri Alındı", user, gerekce.strip())
         req.update(ik_teslim=False, ik_teslim_tarihi=None, ik_teslim_alan=None, son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "İK Teslim Geri Alındı", req["durum"], req["durum"],
                          f"Geri alınan kayıt: {old} | Gerekçe: {gerekce.strip()}")
 
@@ -529,7 +568,7 @@ def mark_sap(user: str, role: str, talep_id: str, tarih: date, not_: str = "") -
             raise ValueError("SAP girişi zaten işaretli.")
         req.update(sap_girildi=True, sap_tarihi=tarih.isoformat(), sap_giren=user, sap_notu=not_.strip() or None,
                    son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "SAP Girişi", req["durum"], req["durum"],
                          f"SAP tarihi: {tarih.isoformat()}" + (f" | Not: {not_.strip()}" if not_.strip() else ""))
 
@@ -546,7 +585,7 @@ def revoke_sap(user: str, role: str, talep_id: str, gerekce: str) -> None:
             raise ValueError("SAP girişi işaretli değil.")
         old = req["sap_tarihi"]
         req.update(sap_girildi=False, sap_tarihi=None, sap_giren=None, sap_notu=None, son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "SAP Girişi Geri Alındı", req["durum"], req["durum"],
                          f"Geri alınan SAP tarihi: {old} | Gerekçe: {gerekce.strip()}")
 
@@ -617,7 +656,7 @@ def alerts(requests: list[Request] | None = None, settings: dict[str, Any] | Non
 # ----------------------------------------------------------------------------
 # Tablolar, Excel içe/dışa aktarma, raporlar
 # ----------------------------------------------------------------------------
-REQ_COLS = ["id", "personel_adi", "izin_turu", "baslangic", "bitis", "gun_sayisi", "is_gunu", "durum", "asama",
+REQ_COLS = ["id", "personel_adi", "izin_turu", "sure", "baslangic", "bitis", "gun_sayisi", "is_gunu", "durum", "asama",
             "cikti_alindi", "ik_teslim", "ik_teslim_tarihi", "ik_teslim_alan", "sap_girildi", "sap_tarihi",
             "ek_sayisi", "aciklama", "olusturan", "olusturma_zamani", "karar_veren", "onay_zamani", "son_guncelleme", "silindi"]
 
@@ -626,7 +665,7 @@ def requests_df(requests: list[Request]) -> pd.DataFrame:
     rows = []
     for r in requests:
         rows.append({
-            "id": r["id"], "personel_adi": r["personel_adi"], "izin_turu": r["izin_turu"],
+            "id": r["id"], "personel_adi": r["personel_adi"], "izin_turu": r["izin_turu"], "sure": rules.sure_etiket(r),
             "baslangic": r["baslangic"], "bitis": r["bitis"], "gun_sayisi": r["gun_sayisi"], "is_gunu": r["is_gunu"],
             "durum": r["durum"], "asama": stage(r), "cikti_alindi": bool(r["cikti_alindi"]),
             "ik_teslim": bool(r["ik_teslim"]), "ik_teslim_tarihi": r["ik_teslim_tarihi"], "ik_teslim_alan": r["ik_teslim_alan"],
@@ -643,17 +682,21 @@ def requests_df(requests: list[Request]) -> pd.DataFrame:
 
 def monthly_usage(requests: list[Request], year: int, statuses: set[str]) -> pd.DataFrame:
     """Ay x izin türü bazında iş günü toplamı."""
-    hol = calendar_utils.holiday_set()
+    full, half = calendar_utils.holiday_info()
     rows = []
     for r in requests:
         if r["durum"] not in statuses:
             continue
-        s, e = date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"])
+        s0, e0 = date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"])
+        if r.get("sure_tipi", "tam") != "tam":
+            if s0.year == year:
+                rows.append({"ay": s0.month, "tur": r["izin_turu"], "gun": float(r["is_gunu"])})
+            continue
         for m in range(1, 13):
-            lo = max(s, date(year, m, 1))
-            hi = min(e, (date(year, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1))
+            lo = max(s0, date(year, m, 1))
+            hi = min(e0, (date(year, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1))
             if lo <= hi:
-                rows.append({"ay": m, "tur": r["izin_turu"], "gun": calendar_utils.work_days(lo, hi, hol)})
+                rows.append({"ay": m, "tur": r["izin_turu"], "gun": calendar_utils.work_days(lo, hi, full, half)})
     return pd.DataFrame(rows, columns=["ay", "tur", "gun"])
 
 
@@ -689,7 +732,7 @@ def export_excel() -> bytes:
     for c in ["olusturma_zamani", "onay_zamani", "son_guncelleme"]:
         df[c] = df[c].dt.strftime("%d.%m.%Y %H:%M")
     logs = pd.DataFrame(audit.logs_store.read())
-    hol = pd.DataFrame(calendar_utils.holidays_store.read())
+    hol = pd.DataFrame(calendar_utils.load_holidays())
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         df.to_excel(xw, sheet_name="Talepler", index=False)
@@ -730,7 +773,7 @@ def delete_request(user: str, role: str, talep_id: str, gerekce: str) -> None:
         asama = stage(req)
         req.update(silindi=True, silinme_zamani=now_str(), silen=user, silme_gerekcesi=gerekce.strip(),
                    son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "Talep Silindi", req["durum"], req["durum"],
                          f"Gerekçe: {gerekce.strip()} | Silinmeden önceki aşama: {asama} | "
                          f"{req['personel_adi']} {req['baslangic']} → {req['bitis']}")
@@ -751,7 +794,7 @@ def restore_request(user: str, role: str, talep_id: str, not_: str = "") -> None
                 raise ValueError(f"Geri yüklenemez: aynı personelin çakışan aktif talebi var ({ov['id']}).")
         req.update(silindi=False, silinme_zamani=None, silen=None, silme_gerekcesi=None,
                    son_guncelleyen=user, son_guncelleme=now_str())
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "Talep Geri Yüklendi", req["durum"], req["durum"], not_.strip())
 
 
@@ -759,25 +802,31 @@ def restore_request(user: str, role: str, talep_id: str, not_: str = "") -> None
 # Şema geçişi ve yedekten geri dönme
 # ----------------------------------------------------------------------------
 def migrate() -> None:
-    """Eski sürümlerde oluşmuş kayıtlara eksik alanları tamamlar (bir kez çalışır)."""
+    """Eski sürümlerden gelen verileri yeni şemaya taşır (bir kez çalışır; hata verirse uygulamayı düşürmez)."""
     with _tx():
         meta = meta_store.read()
-        if meta.get("schema_version", 1) >= SCHEMA_VERSION:
+        ver = meta.get("schema_version", 1)
+        if ver >= SCHEMA_VERSION:
             return
         raw = requests_store.read()
-        if raw:
-            requests_store.write([_normalize(r) for r in raw])
-        people = personnel_store.read()
-        for p in people:  # hak ve devreden artık yıl bazlı; eski tek devreden değeri bu yıla taşınır
-            p.setdefault("hak_yillik", {})
-            p.setdefault("devreden_yillik", {})
+        normalized = [_normalize(r) for r in raw]
+        try:
+            _save_requests(normalized)
+        except ValueError as exc:  # katı doğrulama geçmedi: normalize edilmiş hâliyle yaz, olay kaydet
+            storage.log_event("uyarı", "sema", f"Talep verisi katı doğrulamadan geçmedi: {str(exc)[:300]}")
+            requests_store.write(normalized)
+        people = [normalize(PersonModel, p) for p in personnel_store.read()]
+        for p in people:  # hak ve devreden yıl bazlı; eski tek devreden değeri bu yıla taşınır
             if p.get("devreden"):
                 p["devreden_yillik"].setdefault(str(now().year), p["devreden"])
                 p["devreden"] = 0
         if people:
-            personnel_store.write(people)
+            _save_people(people)
+        calendar_utils.save_holidays(calendar_utils.load_holidays())
+        added = calendar_utils.add_missing_half_days()
         if raw or people:
-            audit.append_log("sistem", "Sistem", "-", "Şema Güncellendi", detay=f"v{meta.get('schema_version', 1)} → v{SCHEMA_VERSION}")
+            audit.append_log("sistem", "Sistem", "-", "Şema Güncellendi",
+                             detay=f"v{ver} → v{SCHEMA_VERSION}" + (f" | {added} arife günü eklendi" if added else ""))
         meta["schema_version"] = SCHEMA_VERSION
         meta_store.write(meta)
 
@@ -793,26 +842,43 @@ def restore_backup(user: str, role: str, name: str) -> None:
 # Düzenleme: izin hakkı (yıl bazlı), personel adı, talep
 # ----------------------------------------------------------------------------
 def set_year_entitlement(user: str, role: str, ad: str, year: int, hak: float, devreden: float, not_: str = "") -> None:
-    """Personelin belirli bir yıl için izin hakkını ve devreden gününü günceller (diğer yıllar etkilenmez)."""
+    """Personelin belirli bir yıl için izin hakkını ve devreden gününü elle belirler (diğer yıllar etkilenmez)."""
     _need(role, "admin")
     _need_user(user)
     if not (0 <= hak <= 366 and 0 <= devreden <= 366):
         raise ValueError("Hak ve devreden gün 0 ile 366 arasında olmalıdır.")
     with _tx():
-        people = personnel_store.read()
+        people = [normalize(PersonModel, p) for p in personnel_store.read()]
         p = next((x for x in people if x["ad"] == ad), None)
         if p is None:
             raise ValueError("Personel bulunamadı.")
-        old_h = _year_value(p, "hak_yillik", "yillik_hak", year, get_settings()["yillik_hak_varsayilan"])
-        old_d = _year_value(p, "devreden_yillik", "devreden", year, 0)
+        old_h = entitlement(p, year)[0]
+        old_d = float(_year_value(p, "devreden_yillik", "devreden", year, 0))
         if (old_h, old_d) == (hak, devreden):
             return
-        p.setdefault("hak_yillik", {})[str(year)] = hak
-        p.setdefault("devreden_yillik", {})[str(year)] = devreden
-        personnel_store.write(people)
+        p["hak_yillik"][str(year)] = hak
+        p["devreden_yillik"][str(year)] = devreden
+        _save_people(people)
         audit.append_log(user, role, "-", "İzin Hakkı Güncellendi",
                          detay=f"{ad} | {year}: hak {old_h:g} → {hak:g}, devreden {old_d:g} → {devreden:g}"
                          + (f" | Not: {not_.strip()}" if not_.strip() else ""))
+
+
+def clear_year_entitlement(user: str, role: str, ad: str, year: int) -> None:
+    """Elle girilen yıl değerini kaldırır; hak yeniden kıdemden / varsayılandan hesaplanır."""
+    _need(role, "admin")
+    _need_user(user)
+    with _tx():
+        people = [normalize(PersonModel, p) for p in personnel_store.read()]
+        p = next((x for x in people if x["ad"] == ad), None)
+        if p is None:
+            raise ValueError("Personel bulunamadı.")
+        if str(year) not in p["hak_yillik"] and str(year) not in p["devreden_yillik"]:
+            raise ValueError("Bu yıl için elle girilmiş değer yok.")
+        p["hak_yillik"].pop(str(year), None)
+        p["devreden_yillik"].pop(str(year), None)
+        _save_people(people)
+        audit.append_log(user, role, "-", "İzin Hakkı Güncellendi", detay=f"{ad} | {year}: elle girilen değer kaldırıldı (otomatik hesaba dönüldü)")
 
 
 def rename_personnel(user: str, role: str, eski: str, yeni: str) -> None:
@@ -823,7 +889,7 @@ def rename_personnel(user: str, role: str, eski: str, yeni: str) -> None:
     if not yeni:
         raise ValueError("Yeni ad boş olamaz.")
     with _tx():
-        people = personnel_store.read()
+        people = [normalize(PersonModel, p) for p in personnel_store.read()]
         p = next((x for x in people if x["ad"] == eski), None)
         if p is None:
             raise ValueError("Personel bulunamadı.")
@@ -836,8 +902,8 @@ def rename_personnel(user: str, role: str, eski: str, yeni: str) -> None:
                 r["personel_adi"] = yeni
                 n += 1
         p["ad"] = yeni
-        personnel_store.write(people)
-        requests_store.write(requests)
+        _save_people(people)
+        _save_requests(requests)
         audit.append_log(user, role, "-", "Personel Yeniden Adlandırıldı", detay=f"{eski} → {yeni} ({n} talep güncellendi)")
 
 
@@ -851,8 +917,9 @@ def can_edit_request(r: Request) -> bool:
 
 
 def edit_request(user: str, role: str, talep_id: str, tur: str, start: date, end: date, aciklama: str,
-                 gerekce: str = "", bakiye_override: bool = False) -> None:
-    """Tür, tarih ve açıklamayı düzenler. Onaylı talepte tür/tarih değişirse talep yeniden onaya düşer."""
+                 gerekce: str = "", bakiye_override: bool = False,
+                 sure_tipi: str | None = None, saat: float | None = None) -> None:
+    """Tür, tarih, süre ve açıklamayı düzenler. Onaylı talepte tür/tarih/süre değişirse talep yeniden onaya düşer."""
     _need(role, "duzenle")
     _need_user(user)
     if tur not in LEAVE_TYPES:
@@ -863,30 +930,37 @@ def edit_request(user: str, role: str, talep_id: str, tur: str, start: date, end
         if not can_edit_request(req):
             raise ValueError("Bu talep düzenlenemez (çıktısı alınmış / teslim edilmiş / SAP'ye girilmiş ya da kapanmış). "
                              "İptal edip yeni talep açın.")
+        sure_tipi = sure_tipi or req["sure_tipi"]
+        if sure_tipi != "tam":
+            end = start
+        saat = saat if sure_tipi == "saatlik" else None
         approved = req["durum"] == S_APPROVED
-        old = (req["izin_turu"], req["baslangic"], req["bitis"], req["aciklama"])
-        new = (tur, start.isoformat(), end.isoformat(), aciklama.strip())
+        old = (req["izin_turu"], req["baslangic"], req["bitis"], req["aciklama"], req["sure_tipi"], req["saat"])
+        new = (tur, start.isoformat(), end.isoformat(), aciklama.strip(), sure_tipi, saat)
         if old == new:
             raise ValueError("Değişiklik yapılmadı.")
         if approved and not gerekce.strip():
             raise ValueError("Onaylı talebi düzenlemek için gerekçe zorunludur.")
-        pv = preview_request(req["personel_adi"], tur, start, end, exclude_id=talep_id)
+        pv = preview_request(req["personel_adi"], tur, start, end, exclude_id=talep_id, sure_tipi=sure_tipi, saat=saat)
         if pv["errors"]:
             raise ValueError(pv["errors"][0])
         if pv["bakiye_yetersiz"] and not bakiye_override:
             b = pv["bakiye"]
-            raise BalanceError(f"Yıllık izin bakiyesi yetersiz: kullanılabilir {b['kullanilabilir']:g} gün, talep {pv['is_gunu']} iş günü.")
-        labels = ["Tür", "Başlangıç", "Bitiş", "Açıklama"]
+            raise BalanceError(f"Yıllık izin bakiyesi yetersiz: kullanılabilir {b['kullanilabilir']:g} gün, talep {pv['is_gunu']:g} iş günü.")
+        labels = ["Tür", "Başlangıç", "Bitiş", "Açıklama", "Süre türü", "Saat"]
         diffs = [f"{n}: {o} → {v}" for n, o, v in zip(labels, old, new) if o != v]
-        material = old[:3] != new[:3]
+        material = any(old[i] != new[i] for i in (0, 1, 2, 4, 5))
         eski_durum = yeni_durum = req["durum"]
+        req["duzenleme_gecmisi"].append({"onceki": {k: req[k] for k in (
+            "izin_turu", "baslangic", "bitis", "aciklama", "sure_tipi", "saat", "is_gunu", "gun_sayisi", "durum", "onay_zamani", "karar_veren")},
+            "kullanici": user, "zaman": now_str()})
         req.update(izin_turu=tur, baslangic=new[1], bitis=new[2], gun_sayisi=pv["takvim_gun"], is_gunu=pv["is_gunu"],
-                   aciklama=new[3], son_guncelleyen=user, son_guncelleme=now_str())
+                   aciklama=new[3], sure_tipi=sure_tipi, saat=saat, son_guncelleyen=user, son_guncelleme=now_str())
         if approved and material:
             req.update(durum=S_PENDING, onay_zamani=None, karar_veren=None)
             yeni_durum = S_PENDING
             diffs.append("Onay sıfırlandı (yeniden onay gerekir)")
-        requests_store.write(requests)
+        _save_requests(requests)
         audit.append_log(user, role, talep_id, "Talep Düzenlendi", eski_durum, yeni_durum,
                          "; ".join(diffs) + (f" | Gerekçe: {gerekce.strip()}" if gerekce.strip() else ""))
 
@@ -962,4 +1036,104 @@ def bulk_apply(user: str, role: str, ids: list[str], action: str, not_: str = ""
                          + (f" | Hatalı: {', '.join(failed)}" if failed else ""))
     return {"ok": ok, "failed": failed}
 
-# END-OF-FILE v2.3
+
+
+# ----------------------------------------------------------------------------
+# Geri alma (undo): kendi başına yapılan son işlemi, süre dolmadıysa ve sonradan başka işlem yapılmadıysa geri alır
+# ----------------------------------------------------------------------------
+UNDO_WINDOW_MIN = 60
+_UNDO_PERM = {"Talep Oluşturuldu": "talep_gir", "Durum Değişti": "onay", "Çıktı Alındı": "cikti", "İK Teslim": "teslim",
+              "SAP Girişi": "sap", "Talep Silindi": "sil", "Talep Düzenlendi": "duzenle"}
+
+
+def _age_minutes(zaman: str) -> float:
+    try:
+        t = datetime.strptime(zaman, "%Y-%m-%d %H:%M:%S").replace(tzinfo=config.TZ)
+    except ValueError:
+        return 1e9
+    return (now() - t).total_seconds() / 60
+
+
+def recent_undoable(limit: int = 6, window_min: int = UNDO_WINDOW_MIN) -> list[dict[str, Any]]:
+    """Talep başına son log kaydı geri alınabilir türdeyse ve süre dolmadıysa listeler (en yeniden eskiye)."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for e in reversed(audit.logs_store.read()[-400:]):
+        tid = e.get("talep_id")
+        if not tid or tid == "-" or tid in seen:
+            continue
+        seen.add(tid)
+        if e["islem"] not in _UNDO_PERM or str(e.get("detay", "")).startswith("↩️"):
+            continue
+        if _age_minutes(e["zaman"]) > window_min:
+            continue
+        out.append(e)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def undo_last(user: str, role: str, talep_id: str) -> str:
+    """Talepteki son işlemi geri alır; geri alınan işlemin adını döndürür. Geri alma da loglanır."""
+    _need_user(user)
+    with _tx():
+        cand = next((e for e in recent_undoable(limit=1000) if e["talep_id"] == talep_id), None)
+        if cand is None:
+            raise ValueError("Bu talepte geri alınabilir bir son işlem yok (süre dolmuş ya da sonradan başka işlem yapılmış).")
+        op = cand["islem"]
+        _need(role, _UNDO_PERM[op])
+        label = f"↩️ Geri alındı: {op} (log #{cand['log_id']}, {cand['kullanici']})"
+        if op == "Talep Oluşturuldu":
+            delete_request(user, role, talep_id, label)
+            return op
+        if op == "Talep Silindi":
+            restore_request(user, role, talep_id, label)
+            return op
+        requests = [_normalize(r) for r in requests_store.read()]
+        req = _find(requests, talep_id)
+        stamp = {"son_guncelleyen": user, "son_guncelleme": now_str()}
+        if op == "Durum Değişti":
+            if req["durum"] != cand["yeni_durum"]:
+                raise ValueError("Talep durumu sonradan değişmiş; geri alınamaz.")
+            eski = cand["eski_durum"]
+            req.update(durum=eski, **stamp)
+            if eski == S_PENDING:
+                req.update(onay_zamani=None, karar_veren=None)
+            _save_requests(requests)
+            audit.append_log(user, role, talep_id, "Durum Değişti", cand["yeni_durum"], eski, label)
+        elif op == "Çıktı Alındı":
+            if not req["cikti_alindi"] or req["ik_teslim"]:
+                raise ValueError("Çıktı durumu sonradan değişmiş; geri alınamaz.")
+            req.update(cikti_alindi=False, cikti_zamani=None, cikti_alan=None, **stamp)
+            _save_requests(requests)
+            audit.append_log(user, role, talep_id, "Çıktı Geri Alındı", req["durum"], req["durum"], label)
+        elif op == "İK Teslim":
+            if not req["ik_teslim"]:
+                raise ValueError("Teslim kaydı sonradan değişmiş; geri alınamaz.")
+            _push_delivery_history(req, "Geri Alındı", user, label)
+            req.update(ik_teslim=False, ik_teslim_tarihi=None, ik_teslim_alan=None, **stamp)
+            _save_requests(requests)
+            audit.append_log(user, role, talep_id, "İK Teslim Geri Alındı", req["durum"], req["durum"], label)
+        elif op == "SAP Girişi":
+            if not req["sap_girildi"]:
+                raise ValueError("SAP kaydı sonradan değişmiş; geri alınamaz.")
+            req.update(sap_girildi=False, sap_tarihi=None, sap_giren=None, sap_notu=None, **stamp)
+            _save_requests(requests)
+            audit.append_log(user, role, talep_id, "SAP Girişi Geri Alındı", req["durum"], req["durum"], label)
+        elif op == "Talep Düzenlendi":
+            if not req["duzenleme_gecmisi"]:
+                raise ValueError("Düzenleme geçmişi bulunamadı; geri alınamaz.")
+            snap = req["duzenleme_gecmisi"].pop()["onceki"]
+            pv = preview_request(req["personel_adi"], snap["izin_turu"], date.fromisoformat(snap["baslangic"]),
+                                 date.fromisoformat(snap["bitis"]), exclude_id=talep_id,
+                                 sure_tipi=snap.get("sure_tipi", "tam"), saat=snap.get("saat"))
+            if pv["errors"]:
+                raise ValueError("Eski değerler artık geçerli değil: " + pv["errors"][0])
+            eski_durum = req["durum"]
+            req.update(snap)
+            req.update(**stamp)
+            _save_requests(requests)
+            audit.append_log(user, role, talep_id, "Talep Düzenlendi", eski_durum, req["durum"], label)
+    return op
+
+# END-OF-FILE v3.0
