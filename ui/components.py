@@ -8,11 +8,13 @@ import pandas as pd
 import streamlit as st
 from filelock import Timeout
 
-from core import config, documents, services
+import hmac
+
+from core import config, documents, rules, services, verify
 from core.config import S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED, STATUS_ICON
 from core.utils import fmt_date, fmt_dt
 
-UI_VERSION = "2.3"
+UI_VERSION = "3.0"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
@@ -24,7 +26,7 @@ def current_user() -> str:
 
 
 def current_role() -> str:
-    return st.session_state.get("rol", "Planlama")
+    return st.session_state.get("rol", "Kullanıcı")
 
 
 def can(perm: str) -> bool:
@@ -87,7 +89,7 @@ def open_request(talep_id: str) -> None:
 # ----------------------------------------------------------------------------
 def _summary(r: dict) -> None:
     st.markdown(f"**{r['id']}** · {r['personel_adi']} · {r['izin_turu']} · "
-                f"{fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} ({r['is_gunu']} iş günü)")
+                f"{fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} ({rules.fmt_days(r['is_gunu'])} iş günü · {rules.sure_etiket(r)})")
 
 
 @st.dialog("Durum güncelle")
@@ -168,13 +170,20 @@ def dialog_edit(talep_id: str) -> None:
     c1, c2 = st.columns(2)
     start = c1.date_input("Başlangıç", value=date.fromisoformat(r["baslangic"]), format="DD.MM.YYYY", key=k("s"))
     end = c2.date_input("Bitiş", value=date.fromisoformat(r["bitis"]), format="DD.MM.YYYY", key=k("e"))
+    tipler = list(rules.SURE_ETIKET)
+    sure = st.selectbox("Süre türü", tipler, index=tipler.index(r["sure_tipi"]), format_func=rules.SURE_ETIKET.get, key=k("st"))
+    saat = None
+    if sure == "saatlik":
+        saat = st.number_input("Saat", 0.5, 24.0, float(r["saat"] or 1), step=0.5, key=k("sa"))
+    if sure != "tam":
+        end = start
     aciklama = st.text_area("Açıklama", value=r["aciklama"], key=k("a"))
     approved = r["durum"] == S_APPROVED
     if approved:
         st.info("Bu talep onaylı. Tür veya tarih değişirse talep **yeniden onaya** düşer; yalnızca açıklama değişirse onay korunur.")
     gerekce = st.text_area("Düzenleme gerekçesi" + (" *" if approved else " (isteğe bağlı)"), key=k("g"))
-    pv = services.preview_request(r["personel_adi"], tur, start, end, exclude_id=talep_id)
-    st.caption(f"{pv['is_gunu']} iş günü · {pv['takvim_gun']} takvim günü")
+    pv = services.preview_request(r["personel_adi"], tur, start, end, exclude_id=talep_id, sure_tipi=sure, saat=saat)
+    st.caption(f"{rules.fmt_days(pv['is_gunu'])} iş günü · {pv['takvim_gun']} takvim günü")
     for e in pv["errors"]:
         st.error(e)
     for w in pv["warnings"]:
@@ -185,7 +194,7 @@ def dialog_edit(talep_id: str) -> None:
         override = st.checkbox("Bakiye yetersiz olsa da kaydet (loga işlenir)", key=k("o"))
     blocked = bool(pv["errors"]) or (pv["bakiye_yetersiz"] and not override)
     if st.button("Değişiklikleri kaydet", type="primary", disabled=blocked, key=k("ok"), width="stretch"):
-        if run(services.edit_request, talep_id, tur, start, end, aciklama, gerekce, override,
+        if run(services.edit_request, talep_id, tur, start, end, aciklama, gerekce, override, sure, saat,
                ok_msg=f"{talep_id} düzenlendi"):
             st.rerun()
 
@@ -239,7 +248,7 @@ def dialog_bulk(action: str, ids: list[str]) -> None:
     reqs = [by_id[i] for i in ids if i in by_id]
     st.markdown(f"**{label}** · {len(reqs)} talep · {len({r['personel_adi'] for r in reqs})} personel")
     st.dataframe(pd.DataFrame([{"Talep": r["id"], "Personel": r["personel_adi"], "Tür": r["izin_turu"],
-                                "Başlangıç": fmt_date(r["baslangic"]), "Bitiş": fmt_date(r["bitis"]), "İş günü": r["is_gunu"]}
+                                "Başlangıç": fmt_date(r["baslangic"]), "Bitiş": fmt_date(r["bitis"]), "İş günü": rules.fmt_days(r["is_gunu"])}
                                for r in reqs]), hide_index=True, width="stretch", height=min(38 + 35 * len(reqs), 260))
     k = lambda n: f"dlg_b{n}_{action}"  # noqa: E731
     note, tarih, alan = "", date.today(), ""
@@ -299,7 +308,7 @@ def render_bulk_panel(selected_ids: list[str], filtered_ids: list[str]) -> None:
         if eligible:
             st.dataframe(pd.DataFrame([{"Talep": i, "Personel": by_id[i]["personel_adi"], "Tür": by_id[i]["izin_turu"],
                                         "Başlangıç": fmt_date(by_id[i]["baslangic"]), "Bitiş": fmt_date(by_id[i]["bitis"]),
-                                        "İş günü": by_id[i]["is_gunu"]} for i in eligible[:100]]),
+                                        "İş günü": rules.fmt_days(by_id[i]["is_gunu"])} for i in eligible[:100]]),
                          hide_index=True, width="stretch", height=min(38 + 35 * len(eligible[:100]), 240))
         if st.button(f"{avail[action][0]} — {len(eligible)} talebe uygula", type="primary", disabled=not eligible, key="bulk_go"):
             dialog_bulk(action, eligible)
@@ -346,7 +355,7 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
     if deleted:
         st.error(f"🗑️ **Silinmiş talep** — {r['silen']} · {fmt_dt(r['silinme_zamani'])}\n\nGerekçe: {r['silme_gerekcesi']}")
     st.markdown(f"**{status_label(r['durum'], deleted)}** · {r['izin_turu']} · {fmt_date(r['baslangic'])} – {fmt_date(r['bitis'])} "
-                f"· **{r['is_gunu']} iş günü** ({r['gun_sayisi']} takvim günü)")
+                f"· **{rules.fmt_days(r['is_gunu'])} iş günü** ({r['gun_sayisi']} takvim günü) · {rules.sure_etiket(r)}")
     if r["aciklama"]:
         st.caption(f"Açıklama: {r['aciklama']}")
     render_steps(r)
@@ -392,9 +401,10 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
     if approved:
         person = services.get_person(r["personel_adi"]) or {}
         c1, c2 = st.columns(2)
-        c1.download_button("📄 İzin formu (Word)", documents.build_docx(r, person), file_name=f"{r['id']}.docx",
+        vurl = verify.url_for(r)
+        c1.download_button("📄 İzin formu (Word)", documents.build_docx(r, person, vurl), file_name=f"{r['id']}.docx",
                            mime=DOCX_MIME, key=k("docx"), width="stretch")
-        pdf = documents.build_pdf(r, person)
+        pdf = documents.build_pdf(r, person, vurl)
         if pdf:
             c2.download_button("📕 İzin formu (PDF)", pdf, file_name=f"{r['id']}.pdf", mime="application/pdf",
                                key=k("pdf"), width="stretch")
@@ -423,4 +433,64 @@ def render_detail(talep_id: str, key_prefix: str = "d") -> None:
         else:
             st.caption("Kayıt yok.")
 
-# END-OF-FILE v2.3
+
+# ----------------------------------------------------------------------------
+# Parola kapısı, geri al paneli, doğrulama sayfası
+# ----------------------------------------------------------------------------
+def password_gate() -> None:
+    """IZIN_APP_PASSWORD (secrets: app_password) tanımlıysa uygulamayı ortak parolayla korur."""
+    pw = config.env("app_password")
+    if not pw or st.session_state.get("_auth_ok"):
+        return
+    st.title("🔒 İzin Takip Sistemi")
+    entered = st.text_input("Parola", type="password", key="_pw_input")
+    if entered:
+        if hmac.compare_digest(entered.encode("utf-8"), pw.encode("utf-8")):
+            st.session_state["_auth_ok"] = True
+            st.rerun()
+        st.error("Parola hatalı.")
+    st.stop()
+
+
+def render_undo_panel() -> None:
+    """Kenar çubuğu: son işlemleri (süre dolmadıysa) tek tıkla geri alır."""
+    if not current_user():
+        return
+    items = services.recent_undoable(5)
+    if not items:
+        return
+    with st.expander(f"↩️ Son işlemleri geri al ({len(items)})"):
+        names = {r["id"]: r["personel_adi"] for r in services.load_requests(include_deleted=True)}
+        for e in items:
+            st.caption(f"**{e['islem']}** · {e['talep_id']} · {names.get(e['talep_id'], '')} — {e['kullanici']}, {fmt_dt(e['zaman'])}")
+            if st.button("Geri al", key=f"undo_{e['log_id']}", width="stretch"):
+                if run(services.undo_last, e["talep_id"], ok_msg=f"{e['talep_id']}: {e['islem']} geri alındı"):
+                    reset_table_selection()
+                    st.rerun()
+        st.caption(f"Son {services.UNDO_WINDOW_MIN} dakika içindeki, sonradan başka işlem yapılmamış işlemler.")
+
+
+def render_verification(talep_id: str, k: str) -> None:
+    """İzin kağıdındaki QR kodun açtığı herkese açık doğrulama sayfası (parola kapısından önce çalışır)."""
+    st.title("✅ İzin Belgesi Doğrulama")
+    res = verify.check(talep_id, k)
+    if res["sonuc"] == "gecerli":
+        t = res["talep"]
+        if t["durum"] == S_APPROVED:
+            st.success("Belge **geçerli**: kayıtla eşleşiyor ve izin **onaylı**.")
+        elif t["durum"] == S_PENDING:
+            st.warning("Belge kayıtla eşleşiyor ancak izin henüz **onaylanmamış** (Beklemede).")
+        else:
+            st.error(f"Belge kayıtla eşleşiyor ancak izin artık **{t['durum']}**. Bu belge geçerli sayılmamalıdır.")
+        st.markdown(f"**Talep no:** {t['id']}  \n**Personel:** {t['personel']}  \n**İzin türü:** {t['tur']}  \n"
+                    f"**Tarih:** {fmt_date(t['baslangic'])} – {fmt_date(t['bitis'])}  \n**Güncel durum:** {t['durum']}"
+                    + (f"  \n**Onaylayan:** {t['karar_veren']} ({fmt_dt(t['onay_zamani'])})" if t["karar_veren"] else "")
+                    + (f"  \n**İK teslim tarihi:** {fmt_date(t['ik_teslim_tarihi'])}" if t["ik_teslim_tarihi"] else ""))
+    elif res["sonuc"] == "eslesmiyor":
+        st.error("Belgedeki kod kayıtla **eşleşmiyor**: belge sahte olabilir ya da talep, belge yazdırıldıktan sonra düzenlenmiş olabilir. "
+                 "Lütfen İK / planlama ile görüşün.")
+    else:
+        st.error("Bu numarayla geçerli bir izin kaydı **bulunamadı**.")
+
+
+# END-OF-FILE v3.0
