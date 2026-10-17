@@ -1,0 +1,32 @@
+name: Günlük bildirim e-postası
+
+# Hafta içi 08:30 (İstanbul, UTC+3) = 05:30 UTC. Elle de çalıştırılabilir.
+on:
+  schedule:
+    - cron: "30 5 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Saat / iş günü / gün içi tekrar denetimlerini atla"
+        type: boolean
+        default: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: Özeti gönder
+        env:
+          IZIN_DATABASE_URL: ${{ secrets.IZIN_DATABASE_URL }}
+          IZIN_AUDIT_KEY: ${{ secrets.IZIN_AUDIT_KEY }}
+          IZIN_SMTP_HOST: ${{ secrets.IZIN_SMTP_HOST }}
+          IZIN_SMTP_PORT: ${{ secrets.IZIN_SMTP_PORT }}
+          IZIN_SMTP_USER: ${{ secrets.IZIN_SMTP_USER }}
+          IZIN_SMTP_PASSWORD: ${{ secrets.IZIN_SMTP_PASSWORD }}
+          IZIN_SMTP_FROM: ${{ secrets.IZIN_SMTP_FROM }}
+          IZIN_APP_URL: ${{ secrets.IZIN_APP_URL }}
+        run: python -m scripts.send_notifications ${{ inputs.force && '--force' || '' }}
