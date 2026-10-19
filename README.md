@@ -1,4 +1,4 @@
-# İzin Takip ve Denetim Sistemi (v3.0)
+# İzin Takip ve Denetim Sistemi (v3.1)
 
 İzin talebi → onay → çıktı → İK teslim → SAP girişi sürecini kayıt altına alan Streamlit uygulaması.
 Tek rütbe: ekipteki herkes her işlemi yapabilir; yapılan her işlem **kullanıcı adıyla** değiştirilemez bir denetim günlüğüne yazılır.
@@ -50,6 +50,7 @@ PDF çıktısı için sistemde Türkçe karakterli font gerekir (Windows/macOS't
 - **Otomatik e-posta (günlük özet):** gecikmiş işler + sistem sorunları. Üç yol: (a) uygulama o gün ilk açıldığında otomatik, (b) GitHub Actions zamanlaması (`.github/workflows/notify.yml`; uygulama kapalı olsa da çalışır), (c) Yönetim > Sistem durumu'ndan elle. Ayarlar: Yönetim > Ayarlar; SMTP bilgileri secrets'ta (`smtp_*`). Gmail için "uygulama şifresi" kullan.
 - **Doğrulanabilir izin formu:** Word/PDF çıktısında QR kod; okutunca herkese açık sayfa belgenin kayıtla eşleşip eşleşmediğini ve **güncel durumunu** (sonradan iptal edildi mi) gösterir. Sahte veya sonradan düzenlenmiş belge eşleşmez. Çalışması için Yönetim > Ayarlar'da *Uygulama adresi* girilmelidir.
 - **Takvim:** aylık takvim ızgarası (resmî tatil, arife, yoğunluk eşiği), gün detayı, zaman çizelgesi.
+- **Birimler (çalışma düzeni):** Her personelin birimi vardır (Ofis, Kaptan, Baş Makinist, Güverte, Yağcı; Ayarlar'dan eklenir/düzenlenir). Birim bazında *hafta sonu çalışılır* ve *resmî tatil çalışılır* ayrı ayarlanır; gemi birimlerinde hafta sonu günleri izin gününden sayılır. Birim değişince personelin mevcut taleplerinin iş günü yeniden hesaplanır (loglanır). Yönetim > Personel > "Toplu birim ata" ile çok kişi tek seferde atanır. Mevcut personel varsayılan olarak **Ofis** gelir: gemi personelini bir kez atayın.
 - **İş kuralları:** yarım gün (sabah/öğleden sonra), saatlik izin (günlük çalışma saatine göre kesirli gün), arife günleri 0,5 iş günü, aynı kişide gün bazında kapasite kontrolü, **işe giriş tarihine göre otomatik yıllık izin hakkı** (elle girilen değer önceliklidir).
 - **Gözlem:** Yönetim > Sistem durumu: bağlantı, sayaçlar, son yedek/bildirim, günlük işlem grafiği, hata olayları.
 - **Tek rütbe + parola:** Yönetim > Ayarlar'dan kullanıcı listesi tanımlanır; `app_password` ile ortak parola konur.
@@ -95,6 +96,6 @@ tests/    pytest (66 test)        .github/workflows/  ci · notify
 ```
 
 ## 7. Sorun giderme
-- **"Kurulum eksik veya karışık"**: listelenen dosyalar eksik/kesik/eski. Tüm klasörleri zip'ten eksiksiz yükleyin; her dosyanın son satırı `# END-OF-FILE v3.0` olmalıdır.
+- **"Kurulum eksik veya karışık"**: listelenen dosyalar eksik/kesik/eski. Tüm klasörleri zip'ten eksiksiz yükleyin; her dosyanın son satırı `# END-OF-FILE v3.1` olmalıdır.
 - **"Veri deposuna bağlanılamadı"**: `database_url` doğru mu, veritabanı uyanık mı (Neon ücretsiz planda boşta uyur; birkaç saniye sonra tekrar deneyin).
 - **QR kod basılmıyor**: Yönetim > Ayarlar > *Uygulama adresi* boş.

@@ -14,7 +14,7 @@ st.set_page_config(page_title="İzin Takip Sistemi", page_icon="🗂️", layout
 # --- Kurulum doğrulaması -------------------------------------------------------------
 # Her dosyanın sonunda sürüm işareti bulunur. Eksik, kesilmiş veya eski sürüm bir dosya varsa
 # kriptik hatalar yerine hangi dosyanın sorunlu olduğu söylenir (proje modülleri import edilmeden ÖNCE).
-VERSION = "3.0"
+VERSION = "3.1"
 _ROOT = Path(__file__).resolve().parent
 _EXPECTED = [
     "core/audit.py", "core/backup.py", "core/bootstrap.py", "core/calendar_utils.py", "core/config.py", "core/documents.py",
