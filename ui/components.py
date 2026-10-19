@@ -14,7 +14,7 @@ from core import config, documents, rules, services, verify
 from core.config import S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED, STATUS_ICON
 from core.utils import fmt_date, fmt_dt
 
-UI_VERSION = "3.0"
+UI_VERSION = "3.1"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
@@ -493,4 +493,4 @@ def render_verification(talep_id: str, k: str) -> None:
         st.error("Bu numarayla geçerli bir izin kaydı **bulunamadı**.")
 
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

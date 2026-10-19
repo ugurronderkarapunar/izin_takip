@@ -74,4 +74,4 @@ def render_month_html(year: int, month: int, entries: dict[date, list[dict[str, 
     rows.append("</tbody></table>")
     return CSS + "".join(rows)
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1
