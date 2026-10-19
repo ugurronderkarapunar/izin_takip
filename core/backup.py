@@ -53,4 +53,4 @@ def zip_bytes() -> bytes:
             z.writestr(f"data/attachments/{tid}/{stored}", data)
     return buf.getvalue()
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

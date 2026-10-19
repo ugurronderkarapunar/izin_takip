@@ -61,23 +61,28 @@ def over_capacity(existing: list[dict[str, Any]], cand: dict[str, Any], gunluk_s
     return None
 
 
-def day_value(d: date, full: set[date], half: set[date]) -> float:
-    """O günün iş günü değeri: hafta sonu / resmî tatil 0, arife 0.5, diğer 1."""
-    if d.weekday() in config.WEEKEND_DAYS or d in full:
+def day_value(d: date, full: set[date], half: set[date], hafta_sonu: bool = False, resmi_tatil: bool = False) -> float:
+    """O günün iş günü değeri. Ofis düzeni: hafta sonu / resmî tatil 0, arife 0.5. Gemi birimleri hafta sonu (ve istenirse tatil) çalışır."""
+    if d.weekday() in config.WEEKEND_DAYS and not hafta_sonu:
         return 0.0
-    return 0.5 if d in half else 1.0
+    if d in full and not resmi_tatil:
+        return 0.0
+    if d in half and not resmi_tatil:
+        return 0.5
+    return 1.0
 
 
 def leave_days(sure_tipi: str, saat: float | None, start: date, end: date,
-               full: set[date], half: set[date], gunluk_saat: float = GUNLUK_SAAT) -> float:
+               full: set[date], half: set[date], gunluk_saat: float = GUNLUK_SAAT,
+               profil: tuple[bool, bool] = (False, False)) -> float:
     """İzin süresi (iş günü olarak, kesirli olabilir)."""
     if end < start:
         return 0.0
     if sure_tipi == "tam":
-        return sum(day_value(start + timedelta(days=i), full, half) for i in range((end - start).days + 1))
+        return sum(day_value(start + timedelta(days=i), full, half, *profil) for i in range((end - start).days + 1))
     if start != end:
         raise ValueError("Yarım gün ve saatlik izin tek güne girilir.")
-    dv = day_value(start, full, half)
+    dv = day_value(start, full, half, *profil)
     if dv == 0:
         return 0.0
     if sure_tipi == "saatlik":
@@ -107,4 +112,4 @@ def kidem_hakki(ise_giris: date, year: int, tablo: Iterable[dict[str, Any]]) -> 
             hak = float(kademe["hak"])
     return hak
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

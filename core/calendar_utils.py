@@ -96,15 +96,16 @@ def is_workday(d: date, holidays: set[date]) -> bool:
     return d.weekday() not in config.WEEKEND_DAYS and d not in holidays
 
 
-def work_days(start: date, end: date, holidays: set[date] | None = None, half: set[date] | None = None) -> float:
-    """Aralıktaki iş günü sayısı (arife günleri 0.5 sayılır)."""
+def work_days(start: date, end: date, holidays: set[date] | None = None, half: set[date] | None = None,
+              profil: tuple[bool, bool] = (False, False)) -> float:
+    """Aralıktaki iş günü sayısı (arife 0.5). profil=(hafta_sonu_çalışır, resmî_tatil_çalışır): gemi birimleri için (True, ...)."""
     if end < start:
         return 0.0
     if holidays is None or half is None:
         full, hf = holiday_info()
         holidays = full if holidays is None else holidays
         half = hf if half is None else half
-    return sum(rules.day_value(start + timedelta(days=i), holidays, half) for i in range((end - start).days + 1))
+    return sum(rules.day_value(start + timedelta(days=i), holidays, half, *profil) for i in range((end - start).days + 1))
 
 
 def daily_entries(requests: Iterable[dict[str, Any]], start: date, end: date, statuses: set[str],
@@ -131,4 +132,4 @@ def daily_people(requests: Iterable[dict[str, Any]], start: date, end: date, sta
                   if rules.fraction(r.get("sure_tipi", "tam"), r.get("saat")) >= min_fraction}
     return out
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

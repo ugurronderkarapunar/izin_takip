@@ -14,7 +14,7 @@ def _rows(r: dict[str, Any], person: dict[str, Any]) -> list[tuple[str, str]]:
     return [
         ("Talep No", r["id"]),
         ("Personel", r["personel_adi"]),
-        ("Ekip", person.get("ekip") or "—"),
+        ("Birim / Ekip", f"{person.get('birim') or '—'} / {person.get('ekip') or '—'}"),
         ("İzin Türü", r["izin_turu"]),
         ("Başlangıç", fmt_date(r["baslangic"])),
         ("Bitiş", fmt_date(r["bitis"])),
@@ -115,4 +115,4 @@ def build_pdf(r: dict[str, Any], person: dict[str, Any], verify_url: str | None 
              new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

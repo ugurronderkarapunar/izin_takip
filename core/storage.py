@@ -728,4 +728,4 @@ def recent_events(limit: int = 50) -> list[dict[str, Any]]:
 
 meta_store = JsonStore("meta", dict)
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

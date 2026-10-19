@@ -112,6 +112,7 @@ class PersonModel(BaseModel):
     devreden_yillik: dict[str, float] = Field(default_factory=dict)
     aktif: bool = True
     ise_giris: str | None = None
+    birim: str = "Ofis"
 
     @field_validator("ise_giris")
     @classmethod
@@ -130,6 +131,18 @@ class HolidayModel(BaseModel):
     def _t(cls, v: str) -> str:
         date.fromisoformat(v)
         return v
+
+
+class Birim(BaseModel):
+    """Çalışma düzeni: ofis personeli hafta sonu çalışmaz; gemi personeli çalışır (izin gününden sayılır)."""
+    ad: str = Field(min_length=1, max_length=60)
+    hafta_sonu: bool = False      # hafta sonu günleri çalışılan gün sayılır (izne yazılırsa izin gününden düşer)
+    resmi_tatil: bool = False     # resmî tatil / arife günleri de çalışılan gün sayılır
+
+
+def _default_birimler() -> list[Birim]:
+    return [Birim(ad="Ofis"), Birim(ad="Kaptan", hafta_sonu=True), Birim(ad="Baş Makinist", hafta_sonu=True),
+            Birim(ad="Güverte", hafta_sonu=True), Birim(ad="Yağcı", hafta_sonu=True)]
 
 
 class KidemKademe(BaseModel):
@@ -160,7 +173,18 @@ class SettingsModel(BaseModel):
     kidem_tablosu: list[KidemKademe] = Field(default_factory=lambda: [
         KidemKademe(min_yil=1, hak=14), KidemKademe(min_yil=6, hak=20), KidemKademe(min_yil=15, hak=26)])
     kullanicilar: list[str] = Field(default_factory=list)
+    birimler: list[Birim] = Field(default_factory=_default_birimler)
     kayitli_filtreler: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("birimler")
+    @classmethod
+    def _birimler(cls, v: list[Birim]) -> list[Birim]:
+        if not v:
+            raise ValueError("En az bir birim tanımlı olmalı.")
+        names = [b.ad.strip().casefold() for b in v]
+        if len(set(names)) != len(names):
+            raise ValueError("Aynı birim adı birden fazla kez girilemez.")
+        return [Birim(ad=b.ad.strip(), hafta_sonu=b.hafta_sonu, resmi_tatil=b.resmi_tatil) for b in v]
 
     @field_validator("bildirim_saat")
     @classmethod
@@ -207,4 +231,4 @@ def validate_dump(model: type[BaseModel], raw: dict[str, Any]) -> dict[str, Any]
     """Katı doğrulama: bilinmeyen alan / hatalı tip ValidationError (ValueError alt sınıfı) fırlatır."""
     return model.model_validate(raw).model_dump()
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

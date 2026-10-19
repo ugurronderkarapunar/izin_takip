@@ -54,4 +54,4 @@ def check(talep_id: str, k: str) -> dict[str, Any]:
         "durum": r["durum"], "karar_veren": r["karar_veren"], "onay_zamani": r["onay_zamani"],
         "cikti_alindi": r["cikti_alindi"], "ik_teslim_tarihi": r["ik_teslim_tarihi"]}}
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

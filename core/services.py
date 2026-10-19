@@ -24,14 +24,14 @@ Request = dict[str, Any]
 requests_store = JsonStore(config.REQUEST_DB, list)
 personnel_store = JsonStore(config.PERSONNEL_DB, list)
 settings_store = JsonStore(config.SETTINGS_DB, dict)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _tx():
     """Tüm yazmaları kapsayan işlem: hata olursa hepsi geri alınır."""
     return transaction()
 
-IMPORT_COLUMNS = ["Personel", "İzin Türü", "Başlangıç", "Bitiş", "Açıklama"]
+IMPORT_COLUMNS = ["Personel", "İzin Türü", "Başlangıç", "Bitiş", "Açıklama", "Birim"]
 
 
 class BalanceError(ValueError):
@@ -55,16 +55,36 @@ def _gunluk_saat() -> float:
     return float(get_settings()["gunluk_calisma_saati"])
 
 
-def _compute_days(sure_tipi: str, saat: float | None, start: date, end: date) -> float:
+def default_birim() -> str:
+    return get_settings()["birimler"][0]["ad"]
+
+
+def birim_profil(birim: str | None, settings: dict[str, Any] | None = None) -> tuple[bool, bool]:
+    """(hafta sonu çalışılır mı, resmî tatil çalışılır mı). Bilinmeyen birim: ofis düzeni."""
+    s = settings or get_settings()
+    for b in s["birimler"]:
+        if b["ad"] == birim:
+            return bool(b["hafta_sonu"]), bool(b["resmi_tatil"])
+    return (False, False)
+
+
+def _profile_for(personel: str, birim: str | None = None) -> tuple[bool, bool]:
+    """Kayıtlı personelin birimine göre; kayıtlı değilse (yeni personel) verilen / varsayılan birime göre."""
+    p = get_person(personel) if personel.strip() else None
+    return birim_profil(p["birim"] if p else (birim or default_birim()))
+
+
+def _compute_days(sure_tipi: str, saat: float | None, start: date, end: date, profil: tuple[bool, bool] = (False, False)) -> float:
     full, half = calendar_utils.holiday_info()
-    return rules.leave_days(sure_tipi, saat, start, end, full, half, _gunluk_saat())
+    return rules.leave_days(sure_tipi, saat, start, end, full, half, _gunluk_saat(), profil)
 
 
 def _normalize(r: Request) -> Request:
     """Eksik alanları varsayılanla doldurur, bilinmeyenleri atar (katı doğrulama yazımda yapılır)."""
     r = normalize(RequestModel, r)
     if r["is_gunu"] is None:
-        r["is_gunu"] = _compute_days(r["sure_tipi"], r["saat"], date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"]))
+        r["is_gunu"] = _compute_days(r["sure_tipi"], r["saat"], date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"]),
+                                     _profile_for(r["personel_adi"]))
     return r
 
 
@@ -138,6 +158,11 @@ def save_settings(user: str, role: str, new: dict[str, Any]) -> None:
             return
         merged = {**cur, **changed}
         SettingsModel(**merged)  # doğrula; geçersizse ValidationError (ValueError) fırlar
+        if "birimler" in changed:
+            used = {p["birim"] for p in list_personnel()}
+            missing = sorted(used - {b["ad"] for b in merged["birimler"]})
+            if missing:
+                raise ValueError("Şu birimler personelde kullanılıyor, kaldırılamaz: " + ", ".join(missing))
         settings_store.write(merged)
         audit.append_log(user, role, "-", "Ayarlar Güncellendi", detay="; ".join(f"{k}={v}" for k, v in changed.items()))
 
@@ -173,34 +198,37 @@ def get_person(ad: str) -> dict[str, Any] | None:
 
 
 def _add_person_unlocked(user: str, role: str, ad: str, hak: float | None = None, devreden: float = 0,
-                         telefon: str = "", ekip: str = "") -> dict[str, Any]:
+                         telefon: str = "", ekip: str = "", birim: str | None = None) -> dict[str, Any]:
     people = [normalize(PersonModel, p) for p in personnel_store.read()]
     if any(p["ad"].strip().casefold() == ad.strip().casefold() for p in people):
         raise ValueError(f"'{ad}' zaten kayıtlı.")
+    birim = birim or default_birim()
+    if birim not in {b["ad"] for b in get_settings()["birimler"]}:
+        raise ValueError(f"Tanımsız birim: {birim}")
     person = models.defaults(PersonModel)
-    person.update(ad=ad.strip(), ekip=ekip.strip(), telefon=telefon.strip(),
+    person.update(ad=ad.strip(), ekip=ekip.strip(), telefon=telefon.strip(), birim=birim,
                   yillik_hak=hak if hak is not None else get_settings()["yillik_hak_varsayilan"],
                   devreden_yillik={str(now().year): devreden} if devreden else {})
     people.append(person)
     _save_people(people)
-    audit.append_log(user, role, "-", "Personel Eklendi", detay=f"{person['ad']} | hak={person['yillik_hak']} devreden={devreden}")
+    audit.append_log(user, role, "-", "Personel Eklendi", detay=f"{person['ad']} | birim={birim} | hak={person['yillik_hak']} devreden={devreden}")
     return person
 
 
 def add_personnel(user: str, role: str, ad: str, hak: float | None = None, devreden: float = 0,
-                  telefon: str = "", ekip: str = "") -> None:
+                  telefon: str = "", ekip: str = "", birim: str | None = None) -> None:
     _need(role, "talep_gir")
     _need_user(user)
     if not ad.strip():
         raise ValueError("Personel adı boş olamaz.")
     with _tx():
-        _add_person_unlocked(user, role, ad, hak, devreden, telefon, ekip)
+        _add_person_unlocked(user, role, ad, hak, devreden, telefon, ekip, birim)
 
 
 def update_personnel(user: str, role: str, ad: str, not_: str = "", **fields: Any) -> None:
     _need(role, "admin")
     _need_user(user)
-    allowed = {"ekip", "telefon", "yillik_hak", "aktif", "ise_giris"}
+    allowed = {"ekip", "telefon", "yillik_hak", "aktif", "ise_giris", "birim"}
     with _tx():
         people = [normalize(PersonModel, p) for p in personnel_store.read()]
         p = next((x for x in people if x["ad"] == ad), None)
@@ -210,6 +238,8 @@ def update_personnel(user: str, role: str, ad: str, not_: str = "", **fields: An
         for k, v in fields.items():
             if k not in allowed:
                 raise ValueError(f"Geçersiz alan: {k}")
+            if k == "birim" and v not in {b["ad"] for b in get_settings()["birimler"]}:
+                raise ValueError(f"Tanımsız birim: {v}")
             if p.get(k) != v:
                 diffs.append(f"{k}: {p.get(k)} → {v}")
                 p[k] = v
@@ -217,6 +247,44 @@ def update_personnel(user: str, role: str, ad: str, not_: str = "", **fields: An
             _save_people(people)
             audit.append_log(user, role, "-", "Personel Güncellendi",
                              detay=f"{ad} | " + "; ".join(diffs) + (f" | Not: {not_.strip()}" if not_.strip() else ""))
+            if "birim" in fields and any(d.startswith("birim:") for d in diffs):
+                _recompute_days(user, role, ad)  # hafta sonu kuralı değişti: mevcut taleplerin iş günü yeniden hesaplanır
+
+
+def _recompute_days(user: str, role: str, ad: str) -> int:
+    """Personelin tam günlük taleplerinde iş gününü güncel birim kuralıyla yeniden hesaplar."""
+    p = get_person(ad)
+    profil = birim_profil(p["birim"] if p else None)
+    full, half = calendar_utils.holiday_info()
+    g = _gunluk_saat()
+    requests = [_normalize(r) for r in requests_store.read()]
+    n = 0
+    for r in requests:
+        if r["personel_adi"] != ad or r["sure_tipi"] != "tam":
+            continue
+        new = rules.leave_days("tam", None, date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"]), full, half, g, profil)
+        if new != r["is_gunu"]:
+            r["is_gunu"] = new
+            n += 1
+    if n:
+        _save_requests(requests)
+        audit.append_log(user, role, "-", "İş Günü Yeniden Hesaplandı", detay=f"{ad}: {n} talep (birim: {p['birim'] if p else '-'})")
+    return n
+
+
+def bulk_set_birim(user: str, role: str, names: list[str], birim: str) -> int:
+    """Birden fazla personelin birimini tek seferde değiştirir; değişen kişi sayısını döndürür."""
+    _need(role, "admin")
+    _need_user(user)
+    if not names:
+        raise ValueError("Personel seçilmedi.")
+    changed = 0
+    for n in names:
+        p = get_person(n)
+        if p and p["birim"] != birim:
+            update_personnel(user, role, n, not_="toplu birim ataması", birim=birim)
+            changed += 1
+    return changed
 
 
 def add_holiday(user: str, role: str, tarih: date, ad: str, yarim: bool = False) -> None:
@@ -258,12 +326,12 @@ def find_overlap(requests: list[Request], personel: str, start: date, end: date,
     return rules.over_capacity(mine, cand, g)
 
 
-def _leave_days_in_year(r: Request, year: int, full: set[date], half: set[date]) -> float:
+def _leave_days_in_year(r: Request, year: int, full: set[date], half: set[date], profil: tuple[bool, bool] = (False, False)) -> float:
     if r.get("sure_tipi", "tam") != "tam":  # yarım gün / saatlik: tek gün
         return float(r["is_gunu"]) if date.fromisoformat(r["baslangic"]).year == year else 0.0
     lo = max(date.fromisoformat(r["baslangic"]), date(year, 1, 1))
     hi = min(date.fromisoformat(r["bitis"]), date(year, 12, 31))
-    return calendar_utils.work_days(lo, hi, full, half) if lo <= hi else 0.0
+    return calendar_utils.work_days(lo, hi, full, half, profil) if lo <= hi else 0.0
 
 
 def _year_value(p: dict[str, Any], yearly_key: str, base_key: str, year: int, default: float) -> float:
@@ -288,6 +356,7 @@ def balance_for(ad: str, year: int, requests: list[Request] | None = None) -> di
     p = get_person(ad) or {}
     full, half = calendar_utils.holiday_info()
     hak, _ = entitlement(p, year)
+    profil = birim_profil(p.get("birim"))
     dev = float(_year_value(p, "devreden_yillik", "devreden", year, 0))
     key = ad.strip().casefold()
     used = pend = 0.0
@@ -295,9 +364,9 @@ def balance_for(ad: str, year: int, requests: list[Request] | None = None) -> di
         if r["personel_adi"].strip().casefold() != key or r["izin_turu"] != ANNUAL:
             continue
         if r["durum"] == S_APPROVED:
-            used += _leave_days_in_year(r, year, full, half)
+            used += _leave_days_in_year(r, year, full, half, profil)
         elif r["durum"] == S_PENDING:
-            pend += _leave_days_in_year(r, year, full, half)
+            pend += _leave_days_in_year(r, year, full, half, profil)
     total = hak + dev
     return {"hak": hak, "devreden": dev, "kullanilan": used, "bekleyen": pend,
             "kalan": total - used, "kullanilabilir": total - used - pend}
@@ -308,10 +377,10 @@ def balance_table(year: int) -> pd.DataFrame:
     rows = []
     for p in list_personnel():
         b = balance_for(p["ad"], year, requests)
-        rows.append({"Personel": p["ad"], "Ekip": p.get("ekip", ""), "Aktif": p.get("aktif", True),
+        rows.append({"Personel": p["ad"], "Birim": p.get("birim", ""), "Ekip": p.get("ekip", ""), "Aktif": p.get("aktif", True),
                      "Hak": b["hak"], "Devreden": b["devreden"], "Kullanılan": b["kullanilan"],
                      "Bekleyen": b["bekleyen"], "Kalan": b["kalan"], "Kullanılabilir": b["kullanilabilir"]})
-    return pd.DataFrame(rows, columns=["Personel", "Ekip", "Aktif", "Hak", "Devreden", "Kullanılan", "Bekleyen", "Kalan", "Kullanılabilir"])
+    return pd.DataFrame(rows, columns=["Personel", "Birim", "Ekip", "Aktif", "Hak", "Devreden", "Kullanılan", "Bekleyen", "Kalan", "Kullanılabilir"])
 
 
 def crowded_days(requests: list[Request], start: date, end: date, personel: str,
@@ -328,7 +397,7 @@ def people_on_leave(requests: list[Request], day: date, statuses: set[str] | Non
 
 
 def preview_request(personel: str, tur: str, start: date, end: date, exclude_id: str | None = None,
-                    sure_tipi: str = "tam", saat: float | None = None) -> dict[str, Any]:
+                    sure_tipi: str = "tam", saat: float | None = None, birim: str | None = None) -> dict[str, Any]:
     """Kaydetmeden önce: hata, uyarı, iş günü, bakiye ve ekip yoğunluğu."""
     out: dict[str, Any] = {"errors": [], "warnings": [], "is_gunu": 0.0, "takvim_gun": 0,
                            "bakiye": None, "bakiye_yetersiz": False}
@@ -341,12 +410,13 @@ def preview_request(personel: str, tur: str, start: date, end: date, exclude_id:
     full, half = calendar_utils.holiday_info()
     out["takvim_gun"] = (end - start).days + 1
     try:
-        out["is_gunu"] = rules.leave_days(sure_tipi, saat, start, end, full, half, _gunluk_saat())
+        out["is_gunu"] = rules.leave_days(sure_tipi, saat, start, end, full, half, _gunluk_saat(), _profile_for(personel, birim))
     except ValueError as exc:
         out["errors"].append(str(exc))
         return out
     if out["is_gunu"] == 0:
-        out["errors"].append("Seçilen aralıkta hiç iş günü yok (hafta sonu / resmî tatil).")
+        out["errors"].append("Seçilen aralıkta hiç iş günü yok (hafta sonu / resmî tatil). "
+                             "Gemi personeli ise kişinin birimini kontrol edin (Yönetim > Personel).")
     if personel.strip():
         requests = [r for r in load_requests() if r["id"] != exclude_id]
         ov = find_overlap(requests, personel, start, end, sure_tipi, saat)
@@ -408,7 +478,8 @@ def read_attachment(talep_id: str, stored: str) -> bytes:
 # ----------------------------------------------------------------------------
 def create_request(user: str, role: str, personel: str, tur: str, start: date, end: date,
                    aciklama: str = "", ekler: list[tuple[str, bytes]] | None = None,
-                   bakiye_override: bool = False, sure_tipi: str = "tam", saat: float | None = None) -> str:
+                   bakiye_override: bool = False, sure_tipi: str = "tam", saat: float | None = None,
+                   birim: str | None = None) -> str:
     _need(role, "talep_gir")
     _need_user(user)
     personel = personel.strip()
@@ -419,17 +490,19 @@ def create_request(user: str, role: str, personel: str, tur: str, start: date, e
     ekler = ekler or []
     for name, data in ekler:
         _validate_attachment(name, data)
+    if birim and birim not in {b["ad"] for b in get_settings()["birimler"]}:
+        raise ValueError(f"Tanımsız birim: {birim}")
     if sure_tipi != "tam":
         end = start  # yarım gün / saatlik izin tek güne girilir
     with _tx():
-        pv = preview_request(personel, tur, start, end, sure_tipi=sure_tipi, saat=saat)
+        pv = preview_request(personel, tur, start, end, sure_tipi=sure_tipi, saat=saat, birim=birim)
         if pv["errors"]:
             raise ValueError(pv["errors"][0])
         if pv["bakiye_yetersiz"] and not bakiye_override:
             b = pv["bakiye"]
             raise BalanceError(f"Yıllık izin bakiyesi yetersiz: kullanılabilir {b['kullanilabilir']:g} gün, talep {pv['is_gunu']:g} iş günü.")
         if get_person(personel) is None:
-            _add_person_unlocked(user, role, personel)
+            _add_person_unlocked(user, role, personel, birim=birim)
         requests = [_normalize(r) for r in requests_store.read()]
         tid = _next_id(requests)
         req: Request = {
@@ -683,10 +756,13 @@ def requests_df(requests: list[Request]) -> pd.DataFrame:
 def monthly_usage(requests: list[Request], year: int, statuses: set[str]) -> pd.DataFrame:
     """Ay x izin türü bazında iş günü toplamı."""
     full, half = calendar_utils.holiday_info()
+    st_ = get_settings()
+    profiles = {p["ad"]: birim_profil(p["birim"], st_) for p in list_personnel()}
     rows = []
     for r in requests:
         if r["durum"] not in statuses:
             continue
+        profil = profiles.get(r["personel_adi"], (False, False))
         s0, e0 = date.fromisoformat(r["baslangic"]), date.fromisoformat(r["bitis"])
         if r.get("sure_tipi", "tam") != "tam":
             if s0.year == year:
@@ -696,19 +772,19 @@ def monthly_usage(requests: list[Request], year: int, statuses: set[str]) -> pd.
             lo = max(s0, date(year, m, 1))
             hi = min(e0, (date(year, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1))
             if lo <= hi:
-                rows.append({"ay": m, "tur": r["izin_turu"], "gun": calendar_utils.work_days(lo, hi, full, half)})
+                rows.append({"ay": m, "tur": r["izin_turu"], "gun": calendar_utils.work_days(lo, hi, full, half, profil)})
     return pd.DataFrame(rows, columns=["ay", "tur", "gun"])
 
 
 def import_template_df() -> pd.DataFrame:
     return pd.DataFrame([{"Personel": "Ad Soyad", "İzin Türü": "Yıllık İzin", "Başlangıç": "20.10.2026",
-                          "Bitiş": "22.10.2026", "Açıklama": "Örnek satır (silin)"}], columns=IMPORT_COLUMNS)
+                          "Bitiş": "22.10.2026", "Açıklama": "Örnek satır (silin)", "Birim": "Ofis"}], columns=IMPORT_COLUMNS)
 
 
 def import_requests(user: str, role: str, df: pd.DataFrame) -> tuple[list[str], list[str]]:
     _need(role, "import")
     df = df.rename(columns=lambda c: str(c).strip())
-    missing = [c for c in IMPORT_COLUMNS[:4] if c not in df.columns]
+    missing = [c for c in IMPORT_COLUMNS[:4] if c not in df.columns]  # "Açıklama" ve "Birim" isteğe bağlı
     if missing:
         raise ValueError("Eksik sütun(lar): " + ", ".join(missing))
     created: list[str] = []
@@ -718,7 +794,8 @@ def import_requests(user: str, role: str, df: pd.DataFrame) -> tuple[list[str], 
             start = pd.to_datetime(row["Başlangıç"], dayfirst=True).date()
             end = pd.to_datetime(row["Bitiş"], dayfirst=True).date()
             aciklama = "" if pd.isna(row.get("Açıklama")) else str(row.get("Açıklama"))
-            created.append(create_request(user, role, str(row["Personel"]), str(row["İzin Türü"]).strip(), start, end, aciklama))
+            birim = str(row["Birim"]).strip() if "Birim" in df.columns and not pd.isna(row.get("Birim")) and str(row.get("Birim")).strip() else None
+            created.append(create_request(user, role, str(row["Personel"]), str(row["İzin Türü"]).strip(), start, end, aciklama, birim=birim))
         except Exception as exc:  # satır bazında hata topla
             errors.append(f"Satır {int(i) + 2}: {exc}")
     return created, errors
@@ -1136,4 +1213,4 @@ def undo_last(user: str, role: str, talep_id: str) -> str:
             audit.append_log(user, role, talep_id, "Talep Düzenlendi", eski_durum, req["durum"], label)
     return op
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

@@ -66,4 +66,4 @@ def describe(e: dict[str, Any], names: dict[str, str] | None = None) -> str:
         return f"{who}: toplu işlem — {e.get('detay', '')[:90]}"
     return f"{who}: {op} {ref}".strip()
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1
