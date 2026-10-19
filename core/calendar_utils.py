@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from typing import Any, Iterable
 
 from . import config, rules
+from .cache import memo
 from .models import HolidayModel, normalize, validate_dump
 from .storage import JsonStore, meta_store, transaction
 
@@ -68,6 +69,7 @@ def add_missing_half_days() -> int:
         return len(new)
 
 
+@memo
 def load_holidays() -> list[dict[str, Any]]:
     return [normalize(HolidayModel, h) for h in holidays_store.read()]
 
@@ -76,6 +78,7 @@ def save_holidays(hol: list[dict[str, Any]]) -> None:
     holidays_store.write(sorted((validate_dump(HolidayModel, h) for h in hol), key=lambda h: h["tarih"]))
 
 
+@memo
 def holiday_info() -> tuple[set[date], set[date]]:
     """(tam gün tatiller, yarım gün tatiller / arifeler)"""
     full: set[date] = set()
