@@ -31,10 +31,13 @@ with t_per:
         _, kaynak = services.entitlement(p, yil)
         kb = lambda n: f"pe_{sel}_{yil}_{n}"  # noqa: E731  (kişi/yıl değişince alanlar yeniden doldurulur)
         with st.form("pe_form"):
-            c1, c2, c3 = st.columns(3)
+            birim_adlari = [b["ad"] for b in services.get_settings()["birimler"]]
+            c1, c2, c3, c4 = st.columns(4)
             yeni_ad = c1.text_input("Ad soyad", sel, key=kb("ad"))
-            ekip = c2.text_input("Ekip", p.get("ekip", ""), key=kb("ekip"))
-            tel = c3.text_input("Telefon", p.get("telefon", ""), key=kb("tel"))
+            birim = c2.selectbox("Birim", birim_adlari, index=birim_adlari.index(p["birim"]) if p["birim"] in birim_adlari else 0, key=kb("birim"),
+                                 help="Gemi birimlerinde hafta sonu çalışılır ve izin gününden sayılır. Birim değişince mevcut taleplerin iş günü yeniden hesaplanır.")
+            ekip = c3.text_input("Ekip", p.get("ekip", ""), key=kb("ekip"))
+            tel = c4.text_input("Telefon", p.get("telefon", ""), key=kb("tel"))
             g1, g2, g3, g4 = st.columns(4)
             giris = g1.date_input("İşe giriş tarihi", value=date.fromisoformat(p["ise_giris"]) if p.get("ise_giris") else None,
                                   min_value=date(1960, 1, 1), max_value=date.today(), format="DD.MM.YYYY", key=kb("giris"),
@@ -58,6 +61,8 @@ with t_per:
                 if ok:
                     msgs.append(f"{yil} hakkı {b['hak']:g} → {hak:g}, devreden {b['devreden']:g} → {dev:g}")
             profile = {}
+            if birim != p["birim"]:
+                profile["birim"] = birim
             if ekip.strip() != p.get("ekip", ""):
                 profile["ekip"] = ekip.strip()
             if tel.strip() != p.get("telefon", ""):
@@ -80,15 +85,24 @@ with t_per:
                 st.rerun()
             elif ok:
                 st.info("Değişiklik yok.")
+    if people:
+        with st.expander("🚢 Toplu birim ata"):
+            st.caption("Birimi henüz atanmamış (varsayılan: Ofis) birden fazla personeli tek seferde doğru birime alın.")
+            tb_names = st.multiselect("Personel", [p_["ad"] for p_ in people], key="tb_names")
+            tb_birim = st.selectbox("Birim", [b["ad"] for b in services.get_settings()["birimler"]], key="tb_birim")
+            if st.button("Birimi ata", disabled=not tb_names, key="tb_go"):
+                if ui.run(services.bulk_set_birim, tb_names, tb_birim, ok_msg=f"{len(tb_names)} personelin birimi '{tb_birim}' olarak güncellendi"):
+                    st.rerun()
     with st.form("pers_add", clear_on_submit=False):
         st.markdown("**Yeni personel ekle**")
-        a1, a2, a3, a4, a5 = st.columns(5)
+        a1, a2, a3, a4, a5, a6 = st.columns(6)
         ad = a1.text_input("Ad soyad *")
-        ekip = a2.text_input("Ekip")
-        tel = a3.text_input("Telefon")
-        hak = a4.number_input("Yıllık hak", 0, 60, int(services.get_settings()["yillik_hak_varsayilan"]))
-        dev = a5.number_input(f"{date.today().year} devreden", 0, 60, 0)
-        if st.form_submit_button("Ekle") and ui.run(services.add_personnel, ad, hak, dev, tel, ekip, ok_msg=f"{ad} eklendi"):
+        yb = a2.selectbox("Birim", [b["ad"] for b in services.get_settings()["birimler"]])
+        ekip = a3.text_input("Ekip")
+        tel = a4.text_input("Telefon")
+        hak = a5.number_input("Yıllık hak", 0, 60, int(services.get_settings()["yillik_hak_varsayilan"]))
+        dev = a6.number_input(f"{date.today().year} devreden", 0, 60, 0)
+        if st.form_submit_button("Ekle") and ui.run(services.add_personnel, ad, hak, dev, tel, ekip, yb, ok_msg=f"{ad} eklendi"):
             st.rerun()
 
 # ------------------------------------------------------------------ Ayarlar
@@ -98,6 +112,17 @@ with t_set:
         st.markdown("**Kullanıcılar** (veri girişi yapacak kişiler; yapılan her işlem bu adla loglanır)")
         users_txt = st.text_area("Her satıra bir ad", "\n".join(s["kullanicilar"]), height=90,
                                  help="Doluysa giriş ekranında bu listeden seçilir; boşsa ad serbest yazılır.")
+        st.markdown("**Birimler ve çalışma düzeni** — hafta sonu çalışılan birimlerde (ör. gemi personeli) hafta sonu günleri izin gününden sayılır. "
+                    "Kendi uygulamanıza / sözleşmenize göre düzenleyin. Personelde kullanılan bir birim silinemez; adı boş bırakılan satır kullanılmaz.")
+        bs = list(s["birimler"]) + [{"ad": "", "hafta_sonu": False, "resmi_tatil": False}] * 3
+        birimler_yeni = []
+        for i in range(len(s["birimler"]) + 3):
+            b1, b2, b3 = st.columns([3, 1, 1])
+            bad = b1.text_input(f"{i + 1}. birim adı", bs[i]["ad"], key=f"bi_ad{i}")
+            bhs = b2.checkbox("Hafta sonu çalışılır", bs[i]["hafta_sonu"], key=f"bi_hs{i}")
+            brt = b3.checkbox("Resmî tatil çalışılır", bs[i]["resmi_tatil"], key=f"bi_rt{i}", help="İşaretliyse resmî tatil / arife günleri de izin gününden sayılır.")
+            if bad.strip():
+                birimler_yeni.append({"ad": bad.strip(), "hafta_sonu": bhs, "resmi_tatil": brt})
         st.markdown("**Süreç eşikleri**")
         a1, a2, a3, a4 = st.columns(4)
         hak_v = a1.number_input("Varsayılan yıllık hak", 0.0, 366.0, float(s["yillik_hak_varsayilan"]), step=1.0)
@@ -142,7 +167,7 @@ with t_set:
                    "otomatik_hak": otomatik, "kidem_tablosu": kidem,
                    "yonetici_telefon": yt, "yonetici_eposta": ye, "ik_telefon": it, "ik_eposta": ie,
                    "planlama_eposta": pe, "ozet_alicilari": oz, "bildirim_aktif": b_aktif, "bildirim_saat": b_saat,
-                   "uygulama_url": url.strip()}
+                   "uygulama_url": url.strip(), "birimler": birimler_yeni}
             if ui.run(services.save_settings, new, ok_msg="Ayarlar kaydedildi"):
                 st.rerun()
 
@@ -258,4 +283,4 @@ with t_sys:
     else:
         st.caption("Kayıtlı olay yok.")
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

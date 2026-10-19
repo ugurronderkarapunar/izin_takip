@@ -20,6 +20,13 @@ people = [p["ad"] for p in services.list_personnel(active_only=True)]
 c1, c2 = st.columns(2)
 sel = c1.selectbox("Personel *", people + [NEW], index=None, placeholder="Seçin…", key=k("personel"))
 ad = c1.text_input("Yeni personel adı soyadı *", key=k("yeni_ad")) if sel == NEW else (sel or "")
+birimler = [b["ad"] for b in services.get_settings()["birimler"]]
+birim = c1.selectbox("Birim *", birimler, key=k("birim"), help="Gemi birimlerinde hafta sonu çalışılır; izne yazılırsa izin gününden sayılır.") if sel == NEW else None
+_pp = services.get_person(ad) if ad else None
+if _pp:
+    c1.caption(f"Birim: **{_pp['birim']}**")
+if services.birim_profil(_pp["birim"] if _pp else birim)[0]:
+    c1.caption("🚢 Bu birimde hafta sonu çalışılır: hafta sonu günleri **izin gününden sayılır**.")
 tur = c2.selectbox("İzin türü *", config.LEAVE_TYPES, key=k("tur"))
 tipler = list(rules.SURE_ETIKET)
 sure = st.radio("Süre türü", tipler, format_func=rules.SURE_ETIKET.get, horizontal=True, key=k("sure"))
@@ -35,7 +42,7 @@ files = st.file_uploader("Ek dosyalar (rapor, dilekçe vb.)", accept_multiple_fi
                          type=[e.strip(".") for e in sorted(config.ALLOWED_EXT)])
 
 # --- Canlı önizleme -----------------------------------------------------------
-pv = services.preview_request(ad, tur, start, end, sure_tipi=sure, saat=saat)
+pv = services.preview_request(ad, tur, start, end, sure_tipi=sure, saat=saat, birim=birim)
 m = st.columns(4)
 m[0].metric("İş günü", rules.fmt_days(pv["is_gunu"]))
 m[1].metric("Takvim günü", pv["takvim_gun"])
@@ -58,7 +65,7 @@ if st.button("Talebi kaydet", type="primary", disabled=blocked):
         try:
             tid = services.create_request(ui.current_user(), ui.current_role(), ad, tur, start, end, aciklama,
                                           [(f.name, f.getvalue()) for f in files or []], bakiye_override=override,
-                                          sure_tipi=sure, saat=saat)
+                                          sure_tipi=sure, saat=saat, birim=birim)
         except (ValueError, PermissionError, OSError) as exc:
             st.error(str(exc))  # form içeriği silinmez
         else:
@@ -66,4 +73,4 @@ if st.button("Talebi kaydet", type="primary", disabled=blocked):
             st.session_state["yt_nonce"] = nonce + 1
             st.rerun()
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

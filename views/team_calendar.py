@@ -97,4 +97,4 @@ with tab_gantt:
     st.subheader("Günlük yoğunluk")
     st.altair_chart((bars + rule).properties(height=220), width="stretch")
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1

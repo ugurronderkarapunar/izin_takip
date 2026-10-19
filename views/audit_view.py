@@ -63,4 +63,4 @@ with st.expander("🔏 Mühür (zincirin dışarıda saklanabilir özeti)"):
         ok, msg = audit.check_seal(seal, logs)
         (st.success if ok else st.error)(msg)
 
-# END-OF-FILE v3.0
+# END-OF-FILE v3.1
