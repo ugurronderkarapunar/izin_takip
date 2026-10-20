@@ -1,172 +1,282 @@
-"""Evrak okuma: PDF metni -> (gerekirse) ücretsiz OCR -> evrak türü ve tarih tahmini. Saf, test edilebilir fonksiyonlar.
-
-Sonuçlar YALNIZCA öneridir; kullanıcı onaylamadan kayıt oluşmaz (yanlış bitiş tarihi güvenlik riskidir).
-"""
+"""Tipli veri modelleri (pydantic): yazımda doğrulama, eksik alanları tamamlama, şema geçişi."""
 from __future__ import annotations
 
-import io
-import re
-import shutil
-from datetime import date
-from functools import lru_cache
-from typing import Any
+import copy
+from datetime import date, datetime
+from typing import Any, Literal
 
-TURLER = ["Gemi Adamı Cüzdanı", "Gemi Adamı Sağlık Belgesi", "Yeterlilik Belgesi", "Telsiz Belgesi", "STCW Belgesi"]
-_TR = str.maketrans({"İ": "i", "I": "i", "ı": "i", "Ğ": "g", "ğ": "g", "Ş": "s", "ş": "s", "Ç": "c", "ç": "c", "Ö": "o", "ö": "o", "Ü": "u", "ü": "u"})
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# (anahtar kelime, ağırlık) — Türkçe karakterden bağımsız (fold edilmiş metinde aranır)
-_KW: dict[str, list[tuple[str, int]]] = {
-    "Gemi Adamı Cüzdanı": [("gemi adami cuzdani", 5), ("gemiadami cuzdani", 5), ("seafarer's identity", 5), ("seafarers identity", 5),
-                           ("seafarer identity", 5), ("seaman's book", 5), ("seamans book", 5), ("identity document", 3), ("cuzdan", 3)],
-    "Gemi Adamı Sağlık Belgesi": [("saglik belgesi", 5), ("saglik sertifikasi", 4), ("medical certificate", 5), ("medical fitness", 4),
-                                  ("fit for sea", 4), ("medical examination", 3), ("saglik", 2), ("medical", 2)],
-    "Yeterlilik Belgesi": [("yeterlik belgesi", 5), ("yeterlilik belgesi", 5), ("certificate of competency", 5), ("certificate of competence", 5),
-                           ("yeterlik", 3), ("yeterlilik", 3), ("competency", 2)],
-    "Telsiz Belgesi": [("telsiz", 4), ("gmdss", 5), ("radio operator", 5), ("general operator", 4), ("restricted operator", 4),
-                       ("radiotelephone", 3), ("radio", 2)],
-    "STCW Belgesi": [("stcw", 3), ("certificate of proficiency", 4), ("basic safety", 4), ("temel guvenlik", 4), ("survival craft", 4),
-                     ("can kurtarma", 4), ("fire fighting", 4), ("yangin", 3), ("ilk yardim", 3), ("first aid", 3), ("security awareness", 3),
-                     ("proficiency", 2), ("egitim", 1), ("training", 1)],
-}
-_AYLAR = {"ocak": 1, "subat": 2, "mart": 3, "nisan": 4, "mayis": 5, "haziran": 6, "temmuz": 7, "agustos": 8, "eylul": 9, "ekim": 10, "kasim": 11, "aralik": 12,
-          "oca": 1, "sub": 2, "mar": 3, "nis": 4, "haz": 6, "tem": 7, "agu": 8, "eyl": 9, "eki": 10, "kas": 11, "ara": 12,
-          "january": 1, "february": 2, "march": 3, "april": 4, "june": 6, "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
-          "jan": 1, "feb": 2, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12}
-_LABELS = {
-    "dogum": ["dogum", "birth", "d.o.b", "dob"],
-    "bitis": ["gecerlilik", "gecerli", "expiry", "expires", "expiration", "valid until", "valid to", "valid thru", "bitis", "son kullanma", "until"],
-    "baslangic": ["duzenlen", "verilis", "verilme", "date of issue", "issue date", "issued", "tarihi", "veren"],
-}
+DURUMLAR = ("Beklemede", "Onaylandı", "Reddedildi", "İptal Edildi")
+SURE_TIPLERI = ("tam", "yarim_sabah", "yarim_ogle", "saatlik")
 
 
-def fold(text: str) -> str:
-    return text.translate(_TR).lower()
-
-
-def classify(text: str) -> tuple[str | None, dict[str, int]]:
-    """Evrak türünü tahmin eder. Belirsizse (düşük puan / yakın puan) None döner: kullanıcıya sorulur."""
-    f = fold(text)
-    scores = {tur: sum(w for kw, w in kws if kw in f) for tur, kws in _KW.items()}
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-    best, second = ranked[0], ranked[1]
-    if best[1] >= 3 and best[1] - second[1] >= 2:
-        return best[0], scores
-    return None, scores
-
-
-_RX = [
-    (re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)"), "dmy"),
-    (re.compile(r"(?<!\d)(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?!\d)"), "ymd"),
-    (re.compile(r"(?<!\d)(\d{1,2})\s*([a-z]{3,9})\.?\s*,?\s*(\d{4})(?!\d)"), "dMy"),
-]
-
-
-def find_dates(text: str) -> list[dict[str, Any]]:
-    """Metindeki tarihler ve yakın etiket türü (başlangıç / bitiş / doğum / None)."""
-    f = fold(text)
-    out: list[dict[str, Any]] = []
-    for rx, kind in _RX:
-        for m in rx.finditer(f):
-            try:
-                if kind == "dmy":
-                    d = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-                elif kind == "ymd":
-                    d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                else:
-                    mon = _AYLAR.get(m.group(2))
-                    if not mon:
-                        continue
-                    d = date(int(m.group(3)), mon, int(m.group(1)))
-            except ValueError:
-                continue
-            if not (1990 <= d.year <= 2100):
-                continue
-            window = f[max(0, m.start() - 70): m.start()]
-            best, pos = None, -1
-            for cat, kws in _LABELS.items():
-                for kw in kws:
-                    i = window.rfind(kw)
-                    if i > pos:
-                        best, pos = cat, i
-            out.append({"tarih": d, "etiket": best, "konum": m.start()})
-    seen, uniq = set(), []
-    for x in sorted(out, key=lambda x: x["konum"]):
-        key = (x["tarih"], x["konum"])
-        if key not in seen:
-            seen.add(key)
-            uniq.append(x)
-    return uniq
-
-
-def suggest_dates(dates: list[dict[str, Any]], today: date | None = None) -> dict[str, Any]:
-    """Başlangıç (düzenlenme) ve belgede yazan bitiş tarihi önerisi. Doğum tarihleri hariç tutulur."""
-    today = today or date.today()
-    usable = [d for d in dates if d["etiket"] != "dogum"]
-    start = next((d["tarih"] for d in usable if d["etiket"] == "baslangic"), None)
-    end = next((d["tarih"] for d in usable if d["etiket"] == "bitis"), None)
-    if start is None:  # etiket yoksa: bugünden geçmişteki en yakın, bitiş olmayan tarih (en olası düzenlenme tarihi)
-        cands = [d["tarih"] for d in usable if d["etiket"] != "bitis" and d["tarih"] <= today]
-        start = max(cands) if cands else None
-    return {"baslangic": start, "bitis_belgede": end, "adaylar": sorted({d["tarih"] for d in usable}, reverse=True)}
-
-
-# ----------------------------------------------------------------------------- metin çıkarma
-def _pymupdf():
-    try:
-        import pymupdf
-        return pymupdf
-    except ImportError:
-        import fitz as pymupdf  # eski ad
-        return pymupdf
-
-
-@lru_cache(maxsize=1)
-def ocr_languages() -> str | None:
-    """Kullanılabilir Tesseract dili ('tur+eng' / 'eng'); motor yoksa None."""
-    if not shutil.which("tesseract"):
+def _iso_date(v: str | None) -> str | None:
+    if v in (None, ""):
         return None
-    try:
-        import pytesseract
-        langs = set(pytesseract.get_languages())
-    except Exception:
-        return None
-    return "tur+eng" if {"tur", "eng"} <= langs else ("eng" if "eng" in langs else None)
+    date.fromisoformat(str(v)[:10])
+    return str(v)
 
 
-def _ocr_images(images: list[Any]) -> dict[str, Any]:
-    lang = ocr_languages()
-    if not lang:
-        return {"text": "", "yontem": "yok", "hata": "OCR motoru (Tesseract) kurulu değil: evrak bilgilerini elle girin."}
-    import pytesseract
-    try:
-        text = "\n".join(pytesseract.image_to_string(img, lang=lang) for img in images)
-    except Exception as exc:
-        return {"text": "", "yontem": "yok", "hata": f"OCR çalışmadı: {exc}"}
-    return {"text": text, "yontem": "ocr", "hata": None}
+class Ek(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dosya: str
+    orijinal_ad: str
+    boyut: int
+    sha256: str
+    yukleyen: str
+    zaman: str
 
 
-def extract_text(data: bytes, filename: str) -> dict[str, Any]:
-    """PDF'in metin katmanını okur; taranmış (görüntü) ise ilk 3 sayfayı ücretsiz OCR (Tesseract) ile okur."""
-    from PIL import Image
-    try:
-        if filename.lower().endswith(".pdf"):
-            doc = _pymupdf().open(stream=data, filetype="pdf")
-            text = "\n".join(page.get_text() for page in doc)
-            if len(re.sub(r"\W", "", text)) >= 40:
-                return {"text": text, "yontem": "pdf-metin", "hata": None}
-            images = [Image.open(io.BytesIO(p.get_pixmap(dpi=200).tobytes("png"))) for p in list(doc)[:3]]
-        else:
-            images = [Image.open(io.BytesIO(data))]
-    except Exception as exc:
-        return {"text": "", "yontem": "yok", "hata": f"Dosya açılamadı: {exc}"}
-    return _ocr_images(images)
+class TeslimGecmisi(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    islem: str
+    eski_tarih: str | None = None
+    eski_alan: str | None = None
+    gerekce: str = ""
+    kullanici: str
+    zaman: str
 
 
-def analyze(data: bytes, filename: str, today: date | None = None) -> dict[str, Any]:
-    """Dosyadan öneriler: tür (None = anlaşılamadı), başlangıç, belgede yazan bitiş, bulunan tarihler."""
-    res = extract_text(data, filename)
-    tur, scores = classify(res["text"]) if res["text"] else (None, {})
-    sug = suggest_dates(find_dates(res["text"]), today) if res["text"] else {"baslangic": None, "bitis_belgede": None, "adaylar": []}
-    return {"tur": tur, "skorlar": scores, "yontem": res["yontem"], "hata": res["hata"], **sug}
+class DuzenlemeGecmisi(BaseModel):
+    """Düzenleme öncesi alanlar; 'geri al' bu kayıtla yapılır."""
+    model_config = ConfigDict(extra="forbid")
+    onceki: dict[str, Any]
+    kullanici: str
+    zaman: str
 
-# END-OF-FILE v3.1
+
+class RequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    personel_adi: str
+    izin_turu: str
+    baslangic: str
+    bitis: str
+    gun_sayisi: int = 1
+    is_gunu: float | None = None
+    sure_tipi: Literal["tam", "yarim_sabah", "yarim_ogle", "saatlik"] = "tam"
+    saat: float | None = None
+    aciklama: str = ""
+    durum: Literal["Beklemede", "Onaylandı", "Reddedildi", "İptal Edildi"] = "Beklemede"
+    olusturan: str
+    olusturma_zamani: str
+    son_guncelleyen: str
+    son_guncelleme: str
+    onay_zamani: str | None = None
+    karar_veren: str | None = None
+    cikti_alindi: bool = False
+    cikti_zamani: str | None = None
+    cikti_alan: str | None = None
+    ik_teslim: bool = False
+    ik_teslim_tarihi: str | None = None
+    ik_teslim_alan: str | None = None
+    teslim_gecmisi: list[TeslimGecmisi] = Field(default_factory=list)
+    sap_girildi: bool = False
+    sap_tarihi: str | None = None
+    sap_giren: str | None = None
+    sap_notu: str | None = None
+    ekler: list[Ek] = Field(default_factory=list)
+    silindi: bool = False
+    silinme_zamani: str | None = None
+    silen: str | None = None
+    silme_gerekcesi: str | None = None
+    duzenleme_gecmisi: list[DuzenlemeGecmisi] = Field(default_factory=list)
+
+    @field_validator("baslangic", "bitis")
+    @classmethod
+    def _tarih(cls, v: str) -> str:
+        return _iso_date(v) or (_ for _ in ()).throw(ValueError("tarih boş olamaz"))
+
+    @field_validator("ik_teslim_tarihi", "sap_tarihi")
+    @classmethod
+    def _tarih_opsiyonel(cls, v: str | None) -> str | None:
+        return _iso_date(v)
+
+    @field_validator("saat")
+    @classmethod
+    def _saat(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 24):
+            raise ValueError("saat 0 ile 24 arasında olmalı")
+        return v
+
+
+class PersonModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ad: str
+    ekip: str = ""
+    telefon: str = ""
+    yillik_hak: float = 20
+    devreden: float = 0
+    hak_yillik: dict[str, float] = Field(default_factory=dict)
+    devreden_yillik: dict[str, float] = Field(default_factory=dict)
+    aktif: bool = True
+    ise_giris: str | None = None
+    birim: str = "Ofis"
+
+    @field_validator("ise_giris")
+    @classmethod
+    def _giris(cls, v: str | None) -> str | None:
+        return _iso_date(v)
+
+
+class HolidayModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tarih: str
+    ad: str
+    yarim: bool = False  # arife gibi yarım gün tatil
+
+    @field_validator("tarih")
+    @classmethod
+    def _t(cls, v: str) -> str:
+        date.fromisoformat(v)
+        return v
+
+
+class Birim(BaseModel):
+    """Çalışma düzeni: ofis personeli hafta sonu çalışmaz; gemi personeli çalışır (izin gününden sayılır)."""
+    ad: str = Field(min_length=1, max_length=60)
+    hafta_sonu: bool = False      # hafta sonu günleri çalışılan gün sayılır (izne yazılırsa izin gününden düşer)
+    resmi_tatil: bool = False     # resmî tatil / arife günleri de çalışılan gün sayılır
+
+
+def _default_birimler() -> list[Birim]:
+    return [Birim(ad="Ofis"), Birim(ad="Kaptan", hafta_sonu=True), Birim(ad="Baş Makinist", hafta_sonu=True),
+            Birim(ad="Güverte", hafta_sonu=True), Birim(ad="Yağcı", hafta_sonu=True)]
+
+
+class EvrakModel(BaseModel):
+    """Personelin özlük dosyasındaki evrak (STCW, sağlık belgesi vb.)."""
+    model_config = ConfigDict(extra="ignore")  # Parser'dan gelen ekstra alanların hata vermesini engeller
+    id: str
+    personel: str
+    tur: str
+    dosya_adi: str
+    saklanan: str | None = None
+    sha256: str | None = None
+    baslangic: str
+    bitis: str | None = None              # süresiz evrakta boş
+    bitis_belgede: str | None = None      # belgenin kendi üzerinde okunan bitiş (kural hesabıyla karşılaştırmak için)
+    kaynak: Literal["ocr", "elle"] = "elle"
+    ocr_yontem: str | None = None
+    yukleyen: str
+    zaman: str
+    notu: str = ""
+    bildirim: dict[str, str] = Field(default_factory=dict)   # gönderilen uyarı eşikleri: {"15": tarih, "7": tarih, "0": tarih}
+    silindi: bool = False
+    silinme_zamani: str | None = None
+    silen: str | None = None
+    silme_gerekcesi: str | None = None
+
+    @field_validator("baslangic", "bitis", "bitis_belgede")
+    @classmethod
+    def _tarih(cls, v: str | None) -> str | None:
+        return _iso_date(v)
+
+
+def _default_evrak_sureleri() -> dict[str, int]:
+    return {"Gemi Adamı Cüzdanı": 5, "Gemi Adamı Sağlık Belgesi": 2, "Yeterlilik Belgesi": 5, "Telsiz Belgesi": 5, "STCW Belgesi": 5}
+
+
+class KidemKademe(BaseModel):
+    min_yil: int = Field(ge=0)
+    hak: float = Field(ge=0, le=366)
+
+
+class SettingsModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    yillik_hak_varsayilan: float = Field(20, ge=0, le=366)
+    esik_ayni_anda: int = Field(3, ge=1, le=1000)
+    uyari_bekleyen_gun: int = Field(2, ge=0, le=60)
+    uyari_cikti_gun: int = Field(1, ge=0, le=60)
+    uyari_teslim_gun: int = Field(2, ge=0, le=60)
+    uyari_sap_gun: int = Field(3, ge=0, le=60)
+    yedek_saklama_gun: int = Field(30, ge=1, le=3650)
+    yonetici_telefon: str = ""
+    yonetici_eposta: str = ""
+    ik_telefon: str = ""
+    ik_eposta: str = ""
+    planlama_eposta: str = ""
+    ozet_alicilari: str = ""           # virgülle ayrılmış e-posta listesi (tüm uyarıların özeti)
+    bildirim_aktif: bool = False
+    bildirim_saat: str = "08:30"
+    uygulama_url: str = ""             # doğrulama QR kodu için (ör. https://izin.streamlit.app)
+    gunluk_calisma_saati: float = Field(8, gt=0, le=24)
+    otomatik_hak: bool = True
+    kidem_tablosu: list[KidemKademe] = Field(default_factory=lambda: [
+        KidemKademe(min_yil=1, hak=14), KidemKademe(min_yil=6, hak=20), KidemKademe(min_yil=15, hak=26)])
+    kullanicilar: list[str] = Field(default_factory=list)
+    birimler: list[Birim] = Field(default_factory=_default_birimler)
+    evrak_sureleri: dict[str, int] = Field(default_factory=_default_evrak_sureleri)   # evrak türü -> geçerlilik (yıl); 0 = süresiz
+    evrak_uyari_gunleri: list[int] = Field(default_factory=lambda: [15, 7])            # bitişe kaç gün kala uyarılsın
+    evrak_alicilari: str = ""                                                         # virgülle ayrılmış e-posta; boşsa özet alıcıları
+    kayitli_filtreler: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("evrak_sureleri")
+    @classmethod
+    def _evrak_sureleri(cls, v: dict[str, int]) -> dict[str, int]:
+        if not v or any(not k.strip() for k in v) or any(not (0 <= y <= 50) for y in v.values()):
+            raise ValueError("Evrak türleri boş olamaz; süre 0 (süresiz) ile 50 yıl arasında olmalı.")
+        return {k.strip(): int(y) for k, y in v.items()}
+
+    @field_validator("evrak_uyari_gunleri")
+    @classmethod
+    def _evrak_uyari(cls, v: list[int]) -> list[int]:
+        if any(not (1 <= d <= 365) for d in v):
+            raise ValueError("Uyarı günleri 1 ile 365 arasında olmalı.")
+        return sorted(set(v), reverse=True)
+
+    @field_validator("birimler")
+    @classmethod
+    def _birimler(cls, v: list[Birim]) -> list[Birim]:
+        if not v:
+            raise ValueError("En az bir birim tanımlı olmalı.")
+        names = [b.ad.strip().casefold() for b in v]
+        if len(set(names)) != len(names):
+            raise ValueError("Aynı birim adı birden fazla kez girilemez.")
+        return [Birim(ad=b.ad.strip(), hafta_sonu=b.hafta_sonu, resmi_tatil=b.resmi_tatil) for b in v]
+
+    @field_validator("bildirim_saat")
+    @classmethod
+    def _saat(cls, v: str) -> str:
+        datetime.strptime(v, "%H:%M")
+        return v
+
+
+class LogEntryModel(BaseModel):
+    """Yeni log kayıtlarının biçimi (eski kayıtlar 'rol' ve 'algo' alanlarını içermeyebilir)."""
+    model_config = ConfigDict(extra="forbid")
+    log_id: int
+    zaman: str
+    kullanici: str
+    rol: str
+    talep_id: str
+    islem: str
+    eski_durum: str = "-"
+    yeni_durum: str = "-"
+    detay: str = ""
+    algo: str
+    onceki_hash: str
+    hash: str = ""
+
+
+def defaults(model: type[BaseModel]) -> dict[str, Any]:
+    """Zorunlu olmayan alanların varsayılanları (her çağrıda yeni kopya)."""
+    out: dict[str, Any] = {}
+    for name, f in model.model_fields.items():
+        if f.is_required():
+            continue
+        out[name] = f.default_factory() if f.default_factory else copy.deepcopy(f.default)
+    return out
+
+
+def normalize(model: type[BaseModel], raw: dict[str, Any]) -> dict[str, Any]:
+    """Bilinmeyen alanları atar, eksikleri varsayılanla doldurur (hızlı yol; doğrulama yazımda yapılır)."""
+    out = defaults(model)
+    out.update({k: v for k, v in raw.items() if k in model.model_fields})
+    return out
+
+
+def validate_dump(model: type[BaseModel], raw: dict[str, Any]) -> dict[str, Any]:
+    """Katı doğrulama: bilinmeyen alan / hatalı tip ValidationError (ValueError alt sınıfı) fırlatır."""
+    return model.model_validate(raw).model_dump()
