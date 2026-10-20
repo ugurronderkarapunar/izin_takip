@@ -145,39 +145,6 @@ def _default_birimler() -> list[Birim]:
             Birim(ad="Güverte", hafta_sonu=True), Birim(ad="Yağcı", hafta_sonu=True)]
 
 
-class EvrakModel(BaseModel):
-    """Personelin özlük dosyasındaki evrak (STCW, sağlık belgesi vb.)."""
-    model_config = ConfigDict(extra="forbid")
-    id: str
-    personel: str
-    tur: str
-    dosya_adi: str
-    saklanan: str | None = None
-    sha256: str | None = None
-    baslangic: str
-    bitis: str | None = None              # süresiz evrakta boş
-    bitis_belgede: str | None = None      # belgenin kendi üzerinde okunan bitiş (kural hesabıyla karşılaştırmak için)
-    kaynak: Literal["ocr", "elle"] = "elle"
-    ocr_yontem: str | None = None
-    yukleyen: str
-    zaman: str
-    notu: str = ""
-    bildirim: dict[str, str] = Field(default_factory=dict)   # gönderilen uyarı eşikleri: {"15": tarih, "7": tarih, "0": tarih}
-    silindi: bool = False
-    silinme_zamani: str | None = None
-    silen: str | None = None
-    silme_gerekcesi: str | None = None
-
-    @field_validator("baslangic", "bitis", "bitis_belgede")
-    @classmethod
-    def _tarih(cls, v: str | None) -> str | None:
-        return _iso_date(v)
-
-
-def _default_evrak_sureleri() -> dict[str, int]:
-    return {"Gemi Adamı Cüzdanı": 5, "Gemi Adamı Sağlık Belgesi": 2, "Yeterlilik Belgesi": 5, "Telsiz Belgesi": 5, "STCW Belgesi": 5}
-
-
 class KidemKademe(BaseModel):
     min_yil: int = Field(ge=0)
     hak: float = Field(ge=0, le=366)
@@ -207,24 +174,7 @@ class SettingsModel(BaseModel):
         KidemKademe(min_yil=1, hak=14), KidemKademe(min_yil=6, hak=20), KidemKademe(min_yil=15, hak=26)])
     kullanicilar: list[str] = Field(default_factory=list)
     birimler: list[Birim] = Field(default_factory=_default_birimler)
-    evrak_sureleri: dict[str, int] = Field(default_factory=_default_evrak_sureleri)   # evrak türü -> geçerlilik (yıl); 0 = süresiz
-    evrak_uyari_gunleri: list[int] = Field(default_factory=lambda: [15, 7])           # bitişe kaç gün kala uyarılsın
-    evrak_alicilari: str = ""                                                          # virgülle ayrılmış e-posta; boşsa özet alıcıları
     kayitli_filtreler: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("evrak_sureleri")
-    @classmethod
-    def _evrak_sureleri(cls, v: dict[str, int]) -> dict[str, int]:
-        if not v or any(not k.strip() for k in v) or any(not (0 <= y <= 50) for y in v.values()):
-            raise ValueError("Evrak türleri boş olamaz; süre 0 (süresiz) ile 50 yıl arasında olmalı.")
-        return {k.strip(): int(y) for k, y in v.items()}
-
-    @field_validator("evrak_uyari_gunleri")
-    @classmethod
-    def _evrak_uyari(cls, v: list[int]) -> list[int]:
-        if any(not (1 <= d <= 365) for d in v):
-            raise ValueError("Uyarı günleri 1 ile 365 arasında olmalı.")
-        return sorted(set(v), reverse=True)
 
     @field_validator("birimler")
     @classmethod
