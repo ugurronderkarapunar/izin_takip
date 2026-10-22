@@ -100,8 +100,8 @@ with t_per:
         yb = a2.selectbox("Birim", [b["ad"] for b in services.get_settings()["birimler"]])
         ekip = a3.text_input("Ekip")
         tel = a4.text_input("Telefon")
-        hak = a5.number_input("Yıllık hak", 0, 60, int(services.get_settings()["yillik_hak_varsayilan"]))
-        dev = a6.number_input(f"{date.today().year} devreden", 0, 60, 0)
+        hak = a5.number_input("Yıllık hak", 0.0, 366.0, float(services.get_settings()["yillik_hak_varsayilan"]), step=1.0)
+        dev = a6.number_input(f"{date.today().year} devreden", 0.0, 366.0, 0.0, step=1.0)
         if st.form_submit_button("Ekle") and ui.run(services.add_personnel, ad, hak, dev, tel, ekip, yb, ok_msg=f"{ad} eklendi"):
             st.rerun()
 
@@ -126,15 +126,15 @@ with t_set:
         st.markdown("**Süreç eşikleri**")
         a1, a2, a3, a4 = st.columns(4)
         hak_v = a1.number_input("Varsayılan yıllık hak", 0.0, 366.0, float(s["yillik_hak_varsayilan"]), step=1.0)
-        esik = a2.number_input("Aynı gün izinli eşiği", 1, 100, int(s["esik_ayni_anda"]))
+        esik = a2.number_input("Aynı gün izinli eşiği", 1, 1000, int(s["esik_ayni_anda"]))
         gsaat = a3.number_input("Günlük çalışma saati", 1.0, 24.0, float(s["gunluk_calisma_saati"]), step=0.5,
                                 help="Saatlik izni güne çevirmek için (ör. 2 saat = 2/8 gün).")
         yedek = a4.number_input("Yedek saklama (gün)", 1, 3650, int(s["yedek_saklama_gun"]))
         b1, b2, b3, b4 = st.columns(4)
-        u1 = b1.number_input("Onay bekleme uyarısı (gün)", 0, 60, int(s["uyari_bekleyen_gun"]))
-        u2 = b2.number_input("Çıktı alınmama uyarısı (gün)", 0, 60, int(s["uyari_cikti_gun"]))
-        u3 = b3.number_input("Teslim edilmeme uyarısı (gün)", 0, 60, int(s["uyari_teslim_gun"]))
-        u4 = b4.number_input("SAP girişi uyarısı (gün)", 0, 60, int(s["uyari_sap_gun"]))
+        u1 = b1.number_input("Onay bekleme uyarısı (gün)", 0, max(60, int(s["uyari_bekleyen_gun"])), int(s["uyari_bekleyen_gun"]))
+        u2 = b2.number_input("Çıktı alınmama uyarısı (gün)", 0, max(60, int(s["uyari_cikti_gun"])), int(s["uyari_cikti_gun"]))
+        u3 = b3.number_input("Teslim edilmeme uyarısı (gün)", 0, max(60, int(s["uyari_teslim_gun"])), int(s["uyari_teslim_gun"]))
+        u4 = b4.number_input("SAP girişi uyarısı (gün)", 0, max(60, int(s["uyari_sap_gun"])), int(s["uyari_sap_gun"]))
         st.markdown("**İzin hakkı (kıdem)** — varsayılan değerler 4857 sayılı İş Kanunu m.53 asgari süreleridir; "
                     "kurumunuzun toplu sözleşmesi farklıysa değiştirin.")
         otomatik = st.toggle("İşe giriş tarihi girilmiş personelin hakkını kıdemden otomatik hesapla", value=bool(s["otomatik_hak"]))
@@ -142,7 +142,7 @@ with t_set:
         k_cols = st.columns(3)
         kidem = []
         for i, col in enumerate(k_cols):
-            my = col.number_input(f"{i + 1}. kademe: en az (yıl)", 0, 60, int(kd[i]["min_yil"]), key=f"kd_y{i}")
+            my = col.number_input(f"{i + 1}. kademe: en az (yıl)", 0, max(60, int(kd[i]["min_yil"])), int(kd[i]["min_yil"]), key=f"kd_y{i}")
             kh = col.number_input(f"{i + 1}. kademe: hak (gün)", 0.0, 366.0, float(kd[i]["hak"]), step=1.0, key=f"kd_h{i}")
             kidem.append({"min_yil": my, "hak": kh})
         st.markdown("**Bildirim kişileri** (uyarılardaki WhatsApp / e-posta bağlantıları ve otomatik e-posta için)")
@@ -283,4 +283,4 @@ with t_sys:
     else:
         st.caption("Kayıtlı olay yok.")
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2
