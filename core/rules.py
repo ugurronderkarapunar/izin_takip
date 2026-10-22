@@ -112,4 +112,4 @@ def kidem_hakki(ise_giris: date, year: int, tablo: Iterable[dict[str, Any]]) -> 
             hak = float(kademe["hak"])
     return hak
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

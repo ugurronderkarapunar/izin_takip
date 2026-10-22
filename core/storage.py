@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import time
 import zlib
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
@@ -28,6 +29,7 @@ log = logging.getLogger("izin")
 _WARNINGS: list[str] = []
 DOC_NAMES = ["request_db", "personnel", "holidays", "settings", "meta", "anchors", "kullanici_durumu", "bildirim_gecmisi"]
 LOCK_KEY = 7364201
+READ_TTL = float(os.environ.get("IZIN_READ_TTL", "3"))   # SQL: işlem dışı okuma önbelleği (sn)
 
 
 def ensure_dirs() -> None:
@@ -43,8 +45,13 @@ def setup_logging() -> None:
         handler: logging.Handler = RotatingFileHandler(config.LOG_FILE, maxBytes=500_000, backupCount=3, encoding="utf-8")
     except OSError:
         handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    handler.setFormatter(fmt)
     log.addHandler(handler)
+    if isinstance(handler, RotatingFileHandler):
+        console = logging.StreamHandler()  # Streamlit Cloud "Manage app" günlüklerinde de görünsün
+        console.setFormatter(fmt)
+        log.addHandler(console)
     log.setLevel(logging.INFO)
 
 
@@ -85,6 +92,9 @@ class Backend:
     def info(self) -> str: raise NotImplementedError
     def transaction(self): raise NotImplementedError
     def clear_caches(self) -> None: raise NotImplementedError
+    def in_transaction(self) -> bool: raise NotImplementedError
+
+    _gen = 0  # her yazma/geri almada artar (önbellek geçersizleme)
 
 
 # ----------------------------------------------------------------------------
@@ -101,6 +111,9 @@ class FileBackend(Backend):
         self._lock: FileLock | None = None
         self._lock_init = threading.Lock()
         self._audit_ready = False
+
+    def in_transaction(self) -> bool:
+        return getattr(self._tls, "depth", 0) > 0
 
     # --- kilit / işlem
     def _flock(self) -> FileLock:
@@ -154,6 +167,7 @@ class FileBackend(Backend):
         log.error("İşlem geri alındı (rollback)")
 
     def clear_caches(self) -> None:
+        self._gen += 1
         with self._cl:
             self._cache.clear()
             self._acache = None
@@ -217,6 +231,7 @@ class FileBackend(Backend):
             if name not in t.before:
                 t.before[name] = p.read_bytes() if p.exists() else None
             self._atomic_bytes(p, raw)
+            self._gen += 1
             st = p.stat()
             with self._cl:
                 self._cache[name] = ((st.st_mtime_ns, st.st_size), raw.decode("utf-8"))
@@ -312,6 +327,7 @@ class FileBackend(Backend):
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
+            self._gen += 1
             with self._cl:
                 self._acache = None
 
@@ -440,7 +456,7 @@ class SqlBackend(Backend):
         if url.startswith("sqlite"):
             kw["connect_args"] = {"check_same_thread": False, "timeout": 30}
         else:  # pgbouncer (işlem havuzu) ile uyumlu: sunucu tarafı hazır ifade yok
-            kw["connect_args"] = {"prepare_threshold": None}
+            kw["connect_args"] = {"prepare_threshold": None, "connect_timeout": 15}
             kw.update(pool_size=3, max_overflow=2, pool_recycle=240, pool_pre_ping=True)
         self.engine = sa.create_engine(url, **kw)
         self.is_pg = self.engine.dialect.name == "postgresql"
@@ -454,10 +470,20 @@ class SqlBackend(Backend):
                            sa.Column("created", sa.String(32)), sa.Column("payload", sa.LargeBinary, nullable=False))
         self.ev = sa.Table("app_events", meta, sa.Column("id", sa.Integer, primary_key=True, autoincrement=True), sa.Column("ts", sa.String(32)),
                            sa.Column("level", sa.String(16)), sa.Column("code", sa.String(32)), sa.Column("message", sa.Text))
-        meta.create_all(self.engine)
+        attempts = max(int(os.environ.get("IZIN_DB_RETRIES", "3")), 1)
+        for i in range(attempts):  # Neon ücretsiz planda uykudan uyanırken ilk bağlantı gecikebilir
+            try:
+                meta.create_all(self.engine)
+                break
+            except Exception as exc:
+                from .diagnostics import is_permanent
+                if i == attempts - 1 or is_permanent(exc):
+                    raise
+                log.warning("Veritabanı bağlantısı denenemedi (%d/%d), tekrar denenecek: %s", i + 1, attempts, type(exc).__name__)
+                time.sleep(3 * (i + 1))
         self._tls = threading.local()
-        self._cache: dict[str, tuple[int, str]] = {}
-        self._acache: tuple[tuple[int, int], list[dict[str, Any]]] | None = None
+        self._cache: dict[str, tuple[int, str, float]] = {}
+        self._acache: tuple[tuple[int, int], list[dict[str, Any]], float] | None = None
         self._cl = threading.Lock()
         self._lock: FileLock | None = None
         self._lock_init = threading.Lock()
@@ -469,6 +495,9 @@ class SqlBackend(Backend):
                 path = self.engine.url.database or "izin.db"
                 self._lock = FileLock(f"{path}.lock", timeout=30)
             return self._lock
+
+    def in_transaction(self) -> bool:
+        return getattr(self._tls, "conn", None) is not None
 
     @contextmanager
     def _conn(self) -> Iterator[Any]:
@@ -504,6 +533,7 @@ class SqlBackend(Backend):
                 self._drop(written, audit=False)
 
     def _drop(self, names: set[str], audit: bool) -> None:
+        self._gen += 1
         with self._cl:
             for n in names:
                 self._cache.pop(n, None)
@@ -511,6 +541,7 @@ class SqlBackend(Backend):
                 self._acache = None
 
     def clear_caches(self) -> None:
+        self._gen += 1
         with self._cl:
             self._cache.clear()
             self._acache = None
@@ -518,6 +549,11 @@ class SqlBackend(Backend):
     # --- belgeler
     def read_doc(self, name: str, default: Callable[[], Any]) -> Any:
         sa, kv = self.sa, self.kv
+        if not self.in_transaction():  # işlem dışı: kısa süreli önbellek (ağ turunu azaltır; yazma önbelleği geçersiz kılar)
+            with self._cl:
+                hit = self._cache.get(name)
+            if hit and time.monotonic() - hit[2] < READ_TTL:
+                return json.loads(hit[1])
         with self._conn() as conn:
             ver = conn.execute(sa.select(kv.c.version).where(kv.c.name == name)).scalar()
             if ver is not None:
@@ -525,11 +561,13 @@ class SqlBackend(Backend):
                 with self._cl:
                     hit = self._cache.get(name)
                 if hit and hit[0] == ver and name not in written:
+                    with self._cl:
+                        self._cache[name] = (ver, hit[1], time.monotonic())
                     return json.loads(hit[1])
                 raw = conn.execute(sa.select(kv.c.data).where(kv.c.name == name)).scalar()
                 if name not in written:
                     with self._cl:
-                        self._cache[name] = (ver, raw)
+                        self._cache[name] = (ver, raw, time.monotonic())
                 return json.loads(raw)
         self.write_doc(name, default())  # ilk kullanım: boş belge oluştur
         return default()
@@ -538,6 +576,7 @@ class SqlBackend(Backend):
         sa, kv = self.sa, self.kv
         raw = json.dumps(data, ensure_ascii=False)
         with self.transaction():
+            self._gen += 1
             conn, ts = self._tls.conn, _now().strftime("%Y-%m-%d %H:%M:%S")
             res = conn.execute(sa.update(kv).where(kv.c.name == name).values(data=raw, version=kv.c.version + 1, updated_at=ts))
             if res.rowcount == 0:
@@ -547,16 +586,23 @@ class SqlBackend(Backend):
     # --- denetim günlüğü (yalnızca ekleme)
     def audit_read(self) -> list[dict[str, Any]]:
         sa, al = self.sa, self.al
+        if not self.in_transaction():
+            with self._cl:
+                c = self._acache
+            if c and time.monotonic() - c[2] < READ_TTL:
+                return list(c[1])
         with self._conn() as conn:
             sig = tuple(conn.execute(sa.select(sa.func.count(), sa.func.max(al.c.log_id))).one())
             with self._cl:
                 c = self._acache
             if c and c[0] == sig:
+                with self._cl:
+                    self._acache = (sig, c[1], time.monotonic())
                 return list(c[1])
             rows = conn.execute(sa.select(al.c.data).order_by(al.c.log_id)).scalars().all()
             entries = [json.loads(r) for r in rows]
             with self._cl:
-                self._acache = (sig, entries)
+                self._acache = (sig, entries, time.monotonic())
             return list(entries)
 
     def audit_last(self) -> dict[str, Any] | None:
@@ -568,6 +614,9 @@ class SqlBackend(Backend):
     def audit_append(self, entry: dict[str, Any]) -> None:
         with self.transaction():
             self._tls.conn.execute(self.sa.insert(self.al).values(log_id=entry["log_id"], data=json.dumps(entry, ensure_ascii=False)))
+            self._gen += 1
+            with self._cl:
+                self._acache = None  # TTL önbelleği bayat kalmasın: yeni kayıt hemen görünür
 
     def audit_replace_all(self, entries: list[dict[str, Any]]) -> None:
         with self.transaction():
@@ -692,6 +741,16 @@ def transaction() -> Iterator[None]:
 data_lock = transaction  # eski ad
 
 
+def in_transaction() -> bool:
+    return get_backend().in_transaction()
+
+
+def generation() -> tuple[int, int]:
+    """(arka uç kimliği, yazma sayacı): önbellekler bu değer değişince geçersiz olur."""
+    b = get_backend()
+    return id(b), b._gen
+
+
 class JsonStore:
     """Tek bir belge (liste ya da sözlük). Ad, dosya adı kökünden (request_db.json -> 'request_db') alınır."""
 
@@ -728,4 +787,4 @@ def recent_events(limit: int = 50) -> list[dict[str, Any]]:
 
 meta_store = JsonStore("meta", dict)
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

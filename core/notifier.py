@@ -182,4 +182,4 @@ def opportunistic() -> dict[str, Any] | None:
         storage.log_event("hata", "bildirim", exc)
         return None
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

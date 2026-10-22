@@ -43,4 +43,4 @@ def memo(fn: Callable[..., Any]) -> Callable[..., Any]:
     wrapper.cache_clear = lambda: state.clear()  # type: ignore[attr-defined]
     return wrapper
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

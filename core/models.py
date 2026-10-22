@@ -231,4 +231,4 @@ def validate_dump(model: type[BaseModel], raw: dict[str, Any]) -> dict[str, Any]
     """Katı doğrulama: bilinmeyen alan / hatalı tip ValidationError (ValueError alt sınıfı) fırlatır."""
     return model.model_validate(raw).model_dump()
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

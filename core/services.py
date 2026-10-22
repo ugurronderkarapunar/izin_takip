@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from . import audit, backup, calendar_utils, config, models, rules, storage
+from .cache import memo
 from .config import (ACTIVE_STATUSES, ALLOWED_TRANSITIONS, ANNUAL, LEAVE_TYPES,
                      S_APPROVED, S_CANCELLED, S_PENDING, S_REJECTED)
 from .models import PersonModel, RequestModel, SettingsModel, normalize, validate_dump
@@ -97,6 +98,7 @@ def _save_people(people: list[dict[str, Any]]) -> None:
     personnel_store.write([validate_dump(PersonModel, p) for p in people])
 
 
+@memo
 def load_requests(include_deleted: bool = False) -> list[Request]:
     """Varsayılan olarak silinmiş (arşivdeki) talepler dahil edilmez."""
     reqs = [_normalize(r) for r in requests_store.read()]
@@ -140,6 +142,7 @@ def _next_id(requests: list[Request]) -> str:
 # ----------------------------------------------------------------------------
 # Ayarlar, kayıtlı filtreler
 # ----------------------------------------------------------------------------
+@memo
 def get_settings() -> dict[str, Any]:
     try:
         return SettingsModel(**settings_store.read()).model_dump()
@@ -187,6 +190,7 @@ def delete_filter(name: str) -> None:
 # ----------------------------------------------------------------------------
 # Personel ve tatiller
 # ----------------------------------------------------------------------------
+@memo
 def list_personnel(active_only: bool = False) -> list[dict[str, Any]]:
     people = [normalize(PersonModel, p) for p in personnel_store.read()]
     return [p for p in people if p["aktif"]] if active_only else people
@@ -1213,4 +1217,4 @@ def undo_last(user: str, role: str, talep_id: str) -> str:
             audit.append_log(user, role, talep_id, "Talep Düzenlendi", eski_durum, req["durum"], label)
     return op
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

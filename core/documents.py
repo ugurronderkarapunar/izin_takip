@@ -115,4 +115,4 @@ def build_pdf(r: dict[str, Any], person: dict[str, Any], verify_url: str | None 
              new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

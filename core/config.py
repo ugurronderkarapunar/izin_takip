@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-APP_VERSION = "3.1"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
+APP_VERSION = "3.2"  # app.py, core/ ve ui/ aynı sürümde olmalı; karışırsa uygulama açılışta uyarır
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 # Veriyi başka bir klasöre almak için: IZIN_DATA_DIR ortam değişkeni
@@ -88,4 +88,4 @@ def env(name: str, default: str = "") -> str:
     """IZIN_<ADI> ortam değişkenini (secrets dahil) okur."""
     return os.environ.get(f"IZIN_{name.upper()}", default).strip()
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2
