@@ -68,4 +68,4 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2
