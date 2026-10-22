@@ -3,7 +3,9 @@
 Çalıştırma:  streamlit run app.py
 """
 import os
+import sys
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -14,10 +16,10 @@ st.set_page_config(page_title="İzin Takip Sistemi", page_icon="🗂️", layout
 # --- Kurulum doğrulaması -------------------------------------------------------------
 # Her dosyanın sonunda sürüm işareti bulunur. Eksik, kesilmiş veya eski sürüm bir dosya varsa
 # kriptik hatalar yerine hangi dosyanın sorunlu olduğu söylenir (proje modülleri import edilmeden ÖNCE).
-VERSION = "3.1"
+VERSION = "3.2"
 _ROOT = Path(__file__).resolve().parent
 _EXPECTED = [
-    "core/audit.py", "core/backup.py", "core/bootstrap.py", "core/calendar_utils.py", "core/config.py", "core/documents.py",
+    "core/audit.py", "core/backup.py", "core/bootstrap.py", "core/cache.py", "core/calendar_utils.py", "core/config.py", "core/diagnostics.py", "core/documents.py",
     "core/inbox.py", "core/models.py", "core/notifier.py", "core/notify.py", "core/rules.py", "core/services.py",
     "core/storage.py", "core/utils.py", "core/verify.py",
     "ui/calendar_grid.py", "ui/components.py",
@@ -25,7 +27,7 @@ _EXPECTED = [
     "views/notifications.py", "views/reports.py", "views/requests_list.py", "views/team_calendar.py",
 ]
 _bad = []
-for _rel in _EXPECTED:
+for _rel in ([] if st.session_state.get("_guard_ok") else _EXPECTED):
     try:
         _ok = (_ROOT / _rel).read_text(encoding="utf-8").rstrip().endswith(f"# END-OF-FILE v{VERSION}")
     except OSError:
@@ -39,6 +41,7 @@ if _bad:
                 "Dosyayı GitHub web arayüzüne yapıştırıyorsanız uzun dosyaların kesilmediğinden emin olun; "
                 "dosyanın son satırı `# END-OF-FILE v" + VERSION + "` olmalıdır.")
     st.stop()
+st.session_state["_guard_ok"] = True
 
 # --- Streamlit secrets -> ortam değişkenleri (database_url, audit_key, app_password, smtp_*, app_url ...) ---------
 try:
@@ -51,7 +54,7 @@ except Exception:  # secrets dosyası yoksa sorun değil (yerel çalışma)
 
 from filelock import Timeout  # noqa: E402
 
-from core import backup, bootstrap, config, inbox, notifier, services, storage  # noqa: E402
+from core import backup, bootstrap, config, diagnostics, inbox, notifier, services, storage  # noqa: E402
 from ui import components as ui  # noqa: E402
 
 
@@ -61,14 +64,20 @@ def _init() -> str:
     return storage.get_backend().kind
 
 
-# Veritabanına ulaşılamazsa kullanıcıya anlaşılır bir mesaj göster
+# Veritabanına ulaşılamazsa: gerçek nedeni (parolası gizli) ve çözümü göster
 try:
     _init()
 except Exception as _exc:
+    _d = diagnostics.describe_error(_exc)
     storage.log.exception("Başlatma hatası")
-    st.error("🔌 **Veri deposuna bağlanılamadı.** Kayıtlarınız korunmuştur; birkaç dakika sonra tekrar deneyin. "
-             "Sorun sürerse veritabanı bağlantı adresini (secrets: `database_url`) kontrol edin.")
-    st.exception(_exc) if os.environ.get("IZIN_DEBUG") else None
+    print(f"[izin] Başlatma hatası: {_d['tur']}: {_d['mesaj']}", file=sys.stderr)
+    st.error("🔌 **Veri deposuna bağlanılamadı.** Kayıtlarınız korunmuştur; veriye dokunulmadı.")
+    st.markdown(f"**Olası neden:** {_d['ipucu']}")
+    st.code(f"{_d['tur']}: {_d['mesaj']}\n{diagnostics.source_info()}", language=None)
+    if st.button("Tekrar dene"):
+        st.cache_resource.clear()
+        storage.use_backend(None)
+        st.rerun()
     st.stop()
 
 # --- İzin kağıdındaki QR kodun açtığı herkese açık doğrulama sayfası (parola kapısından ÖNCE) -------------
@@ -147,9 +156,15 @@ except Timeout:
     st.error("Veri dosyası şu an başka bir işlem tarafından kullanılıyor. Birkaç saniye sonra tekrar deneyin.")
 except Exception as exc:  # Streamlit'in rerun/stop istisnaları BaseException'dır, buraya düşmez
     err_id = uuid.uuid4().hex[:8]
+    _tb = traceback.extract_tb(exc.__traceback__)
+    _fr = lambda f: f"{Path(f.filename).name}:{f.lineno} ({f.name})"  # noqa: E731
+    _page = next((f for f in reversed(_tb) if "/views/" in f.filename.replace("\\", "/")), None)
+    _where = (_fr(_tb[-1]) + (f" ← sayfa {_fr(_page)}" if _page and _page is not _tb[-1] else "")) if _tb else "?"
+    _detail = f"{type(exc).__name__}: {diagnostics.sanitize(str(exc))[:300]}  @ {_where}"
     storage.log.exception("Beklenmeyen hata [%s]", err_id)
-    storage.log_event("hata", err_id, f"{type(exc).__name__}: {exc}")
-    st.error(f"Beklenmeyen bir hata oluştu (hata kodu: **{err_id}**). Kayıtlarınız korunmuştur; ayrıntı Yönetim > Sistem durumu'nda.")
+    storage.log_event("hata", err_id, _detail)
+    st.error(f"Beklenmeyen bir hata oluştu (hata kodu: **{err_id}**). Kayıtlarınız korunmuştur.")
+    st.code(_detail, language=None)  # parola içermez; sorunu bildirirken bu satırı paylaşın
     if os.environ.get("IZIN_DEBUG"):
         st.exception(exc)
     if st.button("Sayfayı yenile"):

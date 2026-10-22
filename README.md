@@ -1,4 +1,4 @@
-# İzin Takip ve Denetim Sistemi (v3.1)
+# İzin Takip ve Denetim Sistemi (v3.2)
 
 İzin talebi → onay → çıktı → İK teslim → SAP girişi sürecini kayıt altına alan Streamlit uygulaması.
 Tek rütbe: ekipteki herkes her işlemi yapabilir; yapılan her işlem **kullanıcı adıyla** değiştirilemez bir denetim günlüğüne yazılır.
