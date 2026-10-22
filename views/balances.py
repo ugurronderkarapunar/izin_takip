@@ -30,4 +30,4 @@ st.download_button("⬇️ Excel", services.df_to_excel({f"Bakiye {yil}": df}), 
                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption("Hak ve devreden değerleri Yönetim > Personel sayfasından, yıl bazında düzenlenir. Bakiye yalnızca 'Yıllık İzin' türünü kapsar; hesap iş günü üzerinden yapılır (hafta sonu ve resmî tatiller düşülür).")
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

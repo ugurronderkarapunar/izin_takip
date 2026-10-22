@@ -87,4 +87,4 @@ with tab_excel:
                         if errors:
                             st.error("Atlanan satırlar:\n\n" + "\n".join(f"- {e}" for e in errors))
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

@@ -115,4 +115,4 @@ if right is not None:
         with st.container(border=True):
             ui.render_detail(selected, "ls")
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2

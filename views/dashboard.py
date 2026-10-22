@@ -103,4 +103,4 @@ if rows:
 else:
     st.caption("Önümüzdeki 14 günde izinli kişi yok.")
 
-# END-OF-FILE v3.1
+# END-OF-FILE v3.2
