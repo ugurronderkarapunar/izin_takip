@@ -183,3 +183,17 @@ def test_requests_list_date_range_filter():
     at.date_input(key="f_tarih").set_value((d, d)).run()
     names = list(at.dataframe[0].value["Personel"])
     assert "UI Tarih Filtre" in names and len(names) < total
+
+
+def test_admin_page_survives_large_stored_values():
+    """Ayarlarda büyük değerler (ör. varsayılan hak 200, eşik 500) Yönetim sayfasını çökertmemeli."""
+    old = services.get_settings()
+    services.save_settings(U, R, {"yillik_hak_varsayilan": 200, "esik_ayni_anda": 500, "uyari_sap_gun": 60,
+                                  "kidem_tablosu": [{"min_yil": 70, "hak": 200}, {"min_yil": 1, "hak": 14}]})
+    try:
+        at = page("admin")
+        assert not at.exception, [e.value for e in at.exception]
+        services.add_personnel(U, R, "Büyük Hak Test")
+        assert services.get_person("Büyük Hak Test")["yillik_hak"] == 200
+    finally:
+        services.save_settings(U, R, {k: old[k] for k in ("yillik_hak_varsayilan", "esik_ayni_anda", "uyari_sap_gun", "kidem_tablosu")})
